@@ -211,6 +211,59 @@ class MarkersObject:
         self.vertex_count = 0
 
 
+# ── measurement lines (GL_LINES reuses point shader) ────────────────────────
+
+class LinesObject:
+    """Pairs of vertices rendered as GL_LINES (measurement segments)."""
+
+    def __init__(self):
+        self.vao          = None
+        self.vbo          = None
+        self.vertex_count = 0   # must be even
+
+    def upload(self, positions: np.ndarray, colors: np.ndarray):
+        """positions (N,3), colors (N,4) — N must be even (pairs of endpoints)."""
+        N = len(positions)
+        if N == 0:
+            self.vertex_count = 0
+            return
+        self.vertex_count = N
+        buf = np.zeros((N, 10), dtype=np.float32)
+        buf[:, 0:3]  = positions
+        buf[:, 6:10] = colors
+
+        if self.vao is None:
+            self.vao = GL.glGenVertexArrays(1)
+            self.vbo = GL.glGenBuffers(1)
+
+        GL.glBindVertexArray(self.vao)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, buf.nbytes, buf, GL.GL_DYNAMIC_DRAW)
+        s = 10 * 4
+        GL.glEnableVertexAttribArray(0)
+        GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, s, ctypes.c_void_p(0))
+        GL.glEnableVertexAttribArray(2)
+        GL.glVertexAttribPointer(2, 4, GL.GL_FLOAT, GL.GL_FALSE, s, ctypes.c_void_p(24))
+        GL.glBindVertexArray(0)
+
+    def draw(self):
+        if self.vao is None or self.vertex_count < 2:
+            return
+        GL.glBindVertexArray(self.vao)
+        GL.glLineWidth(2.5)
+        GL.glDrawArrays(GL.GL_LINES, 0, self.vertex_count)
+        GL.glLineWidth(1.0)
+        GL.glBindVertexArray(0)
+
+    def destroy(self):
+        if self.vbo:
+            GL.glDeleteBuffers(1, [self.vbo])
+        if self.vao:
+            GL.glDeleteVertexArrays(1, [self.vao])
+        self.vao = self.vbo = None
+        self.vertex_count = 0
+
+
 # ── top-level renderer ───────────────────────────────────────────────────────
 
 _CLIP_PASS = np.array(CLIP_PASS_ALL, dtype=np.float32)
@@ -220,14 +273,16 @@ class Renderer:
     """Owns all GPU resources and draws frames with optional dual mesh + clip planes."""
 
     def __init__(self):
-        self.mesh_prog   = None
-        self.point_prog  = None
-        self.mesh_obj    = None          # current mesh (heatmap or solid)
-        self.mesh_obj_ref = None         # reference mesh (wireframe)
-        self.markers     = MarkersObject()
-        self._wireframe  = False
-        self._clip_h     = _CLIP_PASS.copy()   # horizontal clip plane
-        self._clip_v     = _CLIP_PASS.copy()   # vertical clip plane
+        self.mesh_prog    = None
+        self.point_prog   = None
+        self.mesh_obj     = None
+        self.mesh_obj_ref = None
+        self.markers      = MarkersObject()
+        self.meas_lines   = LinesObject()    # measurement line segments
+        self.meas_markers = MarkersObject()  # measurement point markers
+        self._wireframe   = False
+        self._clip_h      = _CLIP_PASS.copy()
+        self._clip_v      = _CLIP_PASS.copy()
 
     def initialize(self):
         self.mesh_prog  = _link(MESH_VERT, MESH_FRAG)
@@ -284,6 +339,18 @@ class Renderer:
         else:
             self.markers.vertex_count = 0
 
+    def update_measurements(self, segments: np.ndarray, seg_colors: np.ndarray,
+                            pts: np.ndarray, pt_colors: np.ndarray):
+        """segments: (N*2, 3) endpoints; pts: (M, 3) point markers."""
+        if len(segments) >= 2:
+            self.meas_lines.upload(segments, seg_colors)
+        else:
+            self.meas_lines.vertex_count = 0
+        if len(pts):
+            self.meas_markers.upload(pts, pt_colors)
+        else:
+            self.meas_markers.vertex_count = 0
+
     # ── drawing ───────────────────────────────────────────────────────────────
 
     def draw(self, mvp: np.ndarray, cam_pos: np.ndarray,
@@ -317,20 +384,33 @@ class Renderer:
             self.mesh_obj.draw()
             GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
 
-        # ── markers (always on top, no clipping) ──
+        # ── always-on-top layer (markers, lines, measure points) ──
+        GL.glDisable(GL.GL_DEPTH_TEST)
+        GL.glDisable(0x3000)   # GL_CLIP_DISTANCE0
+        GL.glDisable(0x3001)   # GL_CLIP_DISTANCE1
+        GL.glUseProgram(self.point_prog)
+        set_vec4(self.point_prog, "u_clip_h", CLIP_PASS_ALL)
+        set_vec4(self.point_prog, "u_clip_v", CLIP_PASS_ALL)
+
         if self.markers.vertex_count > 0:
-            GL.glDisable(GL.GL_DEPTH_TEST)
-            GL.glDisable(0x3000)
-            GL.glDisable(0x3001)
-            GL.glUseProgram(self.point_prog)
             set_mat4 (self.point_prog, "u_mvp",       mvp)
             set_float(self.point_prog, "u_point_size", 18.0)
-            set_vec4(self.point_prog, "u_clip_h", CLIP_PASS_ALL)
-            set_vec4(self.point_prog, "u_clip_v", CLIP_PASS_ALL)
             self.markers.draw()
-            GL.glEnable(0x3000)
-            GL.glEnable(0x3001)
-            GL.glEnable(GL.GL_DEPTH_TEST)
+
+        # Measurement lines (re-use point shader — gl_PointSize ignored for GL_LINES)
+        if self.meas_lines.vertex_count >= 2:
+            set_mat4(self.point_prog, "u_mvp", mvp)
+            self.meas_lines.draw()
+
+        # Measurement point markers
+        if self.meas_markers.vertex_count > 0:
+            set_mat4 (self.point_prog, "u_mvp",       mvp)
+            set_float(self.point_prog, "u_point_size", 14.0)
+            self.meas_markers.draw()
+
+        GL.glEnable(0x3000)
+        GL.glEnable(0x3001)
+        GL.glEnable(GL.GL_DEPTH_TEST)
 
     def _set_mesh_uniforms(self, mvp, cam_pos, use_vcolor, base_color):
         set_mat4(self.mesh_prog, "u_mvp",       mvp)
@@ -352,6 +432,8 @@ class Renderer:
         if self.mesh_obj_ref:
             self.mesh_obj_ref.destroy()
         self.markers.destroy()
+        self.meas_lines.destroy()
+        self.meas_markers.destroy()
         if self.mesh_prog:
             GL.glDeleteProgram(self.mesh_prog)
         if self.point_prog:

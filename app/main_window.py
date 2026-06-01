@@ -85,6 +85,7 @@ class MainWindow(QMainWindow):
         self._gl = GLWidget()
         self._gl.align_ready.connect(self._on_align_ready)
         self._gl.calibrate_ready.connect(self._on_calibrate_ready)
+        self._gl.measure_done.connect(self._on_measurement)
 
         # Right panel
         right = self._build_right_panel()
@@ -192,6 +193,22 @@ class MainWindow(QMainWindow):
         vlay.addWidget(btn_reset_clips)
         layout.addWidget(grp_clip)
 
+        sep4 = QFrame(); sep4.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(sep4)
+
+        # Measurements
+        grp_meas = QGroupBox("Mediciones (📏 M)")
+        mlay = QVBoxLayout(grp_meas)
+        self._meas_list = QLabel("—")
+        self._meas_list.setWordWrap(True)
+        self._meas_list.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._meas_list.setMinimumHeight(60)
+        mlay.addWidget(self._meas_list)
+        btn_clear_meas = QPushButton("Limpiar mediciones")
+        btn_clear_meas.clicked.connect(self._clear_measurements)
+        mlay.addWidget(btn_clear_meas)
+        layout.addWidget(grp_meas)
+
         layout.addStretch()
         return w
 
@@ -259,14 +276,16 @@ class MainWindow(QMainWindow):
             a.setCheckable(checkable)
             return a
 
-        self._act_fit   = act("⊡ Encuadrar",    "F",  tip="Centrar vista en la malla")
-        self._act_wire  = act("⬡ Contorno",      "W",  checkable=True, tip="Vista de contorno")
-        self._act_nav   = act("↖ Navegar",       None, checkable=True, tip="Modo navegación")
-        self._act_calib = act("📐 Calibrar 3pt", None, checkable=True,
-                              tip="Seleccioná 3 puntos de referencia — se guardan como calibración")
-        self._act_align = act("△ Alinear 3pt",   None, checkable=True,
-                              tip="Alinear esta malla usando los 3 puntos calibrados")
-        self._act_hmap  = act("⬛ Quitar mapa",   None, tip="Volver a color base")
+        self._act_fit    = act("⊡ Encuadrar",    "F",  tip="Centrar vista en la malla")
+        self._act_wire   = act("⬡ Contorno",      "W",  checkable=True, tip="Vista de contorno")
+        self._act_nav    = act("↖ Navegar",       None, checkable=True, tip="Modo navegación")
+        self._act_calib  = act("📐 Calibrar 3pt", None, checkable=True,
+                               tip="Seleccioná 3 puntos de referencia — se guardan como calibración")
+        self._act_align  = act("△ Alinear 3pt",   None, checkable=True,
+                               tip="Alinear esta malla usando los 3 puntos calibrados")
+        self._act_measure = act("📏 Medir",        "M",  checkable=True,
+                               tip="Medir distancia entre dos puntos (misma malla o entre dos mallas)")
+        self._act_hmap   = act("⬛ Quitar mapa",   None, tip="Volver a color base")
 
         self._act_nav.setChecked(True)
 
@@ -277,6 +296,7 @@ class MainWindow(QMainWindow):
         tb.addAction(self._act_nav)
         tb.addAction(self._act_calib)
         tb.addAction(self._act_align)
+        tb.addAction(self._act_measure)
         tb.addSeparator()
         tb.addAction(self._act_hmap)
 
@@ -285,6 +305,7 @@ class MainWindow(QMainWindow):
         self._act_nav.triggered.connect(lambda: self._set_mode(Mode.NAVIGATE))
         self._act_calib.triggered.connect(lambda: self._set_mode(Mode.CALIBRATE_3PT))
         self._act_align.triggered.connect(lambda: self._set_mode(Mode.ALIGN_3PT))
+        self._act_measure.triggered.connect(lambda: self._set_mode(Mode.MEASURE))
         self._act_hmap.triggered.connect(self._clear_heatmap)
 
     def _build_status(self):
@@ -300,6 +321,7 @@ class MainWindow(QMainWindow):
         self._act_nav.setChecked(mode == Mode.NAVIGATE)
         self._act_calib.setChecked(mode == Mode.CALIBRATE_3PT)
         self._act_align.setChecked(mode == Mode.ALIGN_3PT)
+        self._act_measure.setChecked(mode == Mode.MEASURE)
         self._gl.set_mode(mode)
 
     # ── campaign slots ───────────────────────────────────────────────────────
@@ -532,6 +554,20 @@ class MainWindow(QMainWindow):
             )
         except ValueError as e:
             QMessageBox.warning(self, "Alineación", str(e))
+
+    # ── measurements ─────────────────────────────────────────────────────────
+
+    def _on_measurement(self, m):
+        """Called when a new distance measurement is complete."""
+        lines = self._meas_list.text().split("\n") if self._meas_list.text() != "—" else []
+        n = len(lines) + 1
+        lines.append(f"{n}:  {m.label}")
+        self._meas_list.setText("\n".join(lines))
+        self._status_main.setText(f"📏 Distancia #{n}: {m.label}")
+
+    def _clear_measurements(self):
+        self._gl.clear_measurements()
+        self._meas_list.setText("—")
 
     # ── project save / load ──────────────────────────────────────────────────
 
