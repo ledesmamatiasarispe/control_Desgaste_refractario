@@ -9,37 +9,62 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    # Ubuntu 20.04 + Python 3.10 = entorno certificado por el equipo de Kivy
+    runs-on: ubuntu-20.04
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10"
 
-      # ── System deps ───────────────────────────────────────────────────────
+      # ── System deps (lista completa del Kivy team) ───────────────────────
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            git zip unzip curl wget \
-            openjdk-17-jdk \
+          sudo apt-get install -y \
+            python3-pip \
             build-essential \
-            libffi-dev libssl-dev libncurses5-dev \
-            libsqlite3-dev libreadline-dev libbz2-dev \
-            libltdl-dev libjpeg-dev libpng-dev \
-            zlib1g-dev autoconf libtool pkg-config cmake \
-            ccache lld
+            git \
+            ffmpeg \
+            libsdl2-dev \
+            libsdl2-image-dev \
+            libsdl2-mixer-dev \
+            libsdl2-ttf-dev \
+            libportmidi-dev \
+            libswscale-dev \
+            libavformat-dev \
+            libavcodec-dev \
+            zlib1g-dev \
+            libgstreamer1.0 \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            libltdl-dev \
+            libffi-dev \
+            libssl-dev \
+            autoconf \
+            libtool \
+            pkg-config \
+            zip \
+            unzip \
+            openjdk-17-jdk \
+            ccache
 
-      # ── Cache Buildozer (SDK/NDK — ~3 GB, tarda 15 min sin cache) ────────
-      - name: Cache Buildozer global dir
+      # ── Java ────────────────────────────────────────────────────────────
+      - name: Set up Java 17
+        run: |
+          echo "JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))" >> $GITHUB_ENV
+          java -version
+
+      # ── Cache Buildozer (SDK/NDK ~ 3 GB) ────────────────────────────────
+      - name: Cache Buildozer
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-v2-${{ hashFiles('android_app/buildozer.spec') }}
+          key: buildozer-u20-py310-${{ hashFiles('android_app/buildozer.spec') }}
           restore-keys: |
-            buildozer-v2-
+            buildozer-u20-py310-
 
       - name: Cache CCache
         uses: actions/cache@v4
@@ -48,72 +73,72 @@ jobs:
           key: ccache-${{ github.sha }}
           restore-keys: ccache-
 
-      # ── Python build tools ────────────────────────────────────────────────
+      # ── Python tools ─────────────────────────────────────────────────────
       - name: Install Buildozer + Cython
         run: |
-          pip install --upgrade pip
-          pip install --upgrade buildozer cython virtualenv
+          pip install --upgrade pip wheel setuptools
+          pip install --upgrade "buildozer==1.5.0" "cython==0.29.37" virtualenv
 
-      # ── Leer versión ──────────────────────────────────────────────────────
+      # ── Leer versión ─────────────────────────────────────────────────────
       - name: Read app version
         id: ver
         run: |
-          VERSION=$(python android_app/version.py 2>/dev/null || \
-                    python -c "exec(open('android_app/version.py').read()); print(VERSION)")
+          VERSION=$(python android_app/version.py)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building version: $VERSION"
 
-      # ── Compilar APK (pipefail para detectar errores de buildozer) ────────
+      # ── Compilar APK ─────────────────────────────────────────────────────
       - name: Build debug APK
         working-directory: android_app
         env:
           CCACHE_DIR: ~/.ccache
         run: |
           set -o pipefail
-          buildozer android debug 2>&1 | tee /tmp/buildozer.log
-          echo "Exit code: $?"
+          # yes | acepta licencias del SDK automáticamente
+          yes | buildozer -v android debug 2>&1 | tee /tmp/buildozer.log
+          RC=${PIPESTATUS[0]}
+          echo "Buildozer exit code: $RC"
+          exit $RC
 
-      # ── Mostrar log si falló ──────────────────────────────────────────────
-      - name: Show buildozer log on failure
+      # ── Log completo si falló ────────────────────────────────────────────
+      - name: Show error log on failure
         if: failure()
         run: |
-          echo "=== Last 100 lines of buildozer log ==="
-          tail -100 /tmp/buildozer.log || true
-          echo "=== APK search ==="
-          find android_app -name "*.apk" 2>/dev/null || echo "No APKs found"
+          echo "====== ÚLTIMAS 150 LÍNEAS DEL LOG ======"
+          tail -150 /tmp/buildozer.log 2>/dev/null || echo "(log vacío)"
+          echo "====== BÚSQUEDA DE APK ======"
+          find android_app -name "*.apk" 2>/dev/null || echo "ningún APK encontrado"
+          echo "====== DISCO ======"
+          df -h
 
-      # ── Renombrar APK ─────────────────────────────────────────────────────
+      # ── Renombrar y publicar ─────────────────────────────────────────────
       - name: Rename APK
+        id: apk
         run: |
-          APK=$(find android_app/bin -name "*.apk" | head -1)
+          APK=$(find android_app/bin -name "*.apk" 2>/dev/null | head -1)
           if [ -z "$APK" ]; then
-            echo "ERROR: No APK found in android_app/bin/"
-            ls -la android_app/bin/ || echo "bin/ does not exist"
+            echo "ERROR: no se encontró APK en android_app/bin/"
+            ls -la android_app/bin/ 2>/dev/null || echo "directorio bin/ inexistente"
             exit 1
           fi
-          echo "Found APK: $APK"
           DEST="refractory-capture-v${{ steps.ver.outputs.version }}.apk"
           cp "$APK" "$DEST"
-          echo "APK_PATH=$DEST" >> "$GITHUB_ENV"
+          echo "path=$DEST" >> "$GITHUB_OUTPUT"
           ls -lh "$DEST"
 
-      # ── Publicar Release ──────────────────────────────────────────────────
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           name: "Refractory Capture v${{ steps.ver.outputs.version }}"
           body: |
-            ## Cambios
             Commit: ${{ github.sha }}
 
-            ### Cómo instalar
+            **Instalación:**
             1. Descargá el `.apk`
-            2. En el celular: Configuración → Seguridad → activar *Instalar apps desconocidas*
+            2. En el celular: Ajustes → Seguridad → *Instalar apps desconocidas*
             3. Abrí el APK e instalá
-
-            > Si ya tenés la app instalada, se actualizará automáticamente al abrir la app.
-          files: ${{ env.APK_PATH }}
+          files: ${{ steps.apk.outputs.path }}
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
