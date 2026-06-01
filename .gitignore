@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Buildozer (Android build artifacts — muy grandes, no van al repo)
+android_app/.buildozer/
+android_app/bin/
+android_app/.gradle/
+
+# Auto-update downloaded files
+android_app/_updates/
+
+# PC Server temp jobs
+pc_server/jobs/
+
+# Proyecto de usuario (datos, no código)
+*.refproj
+*.npz
+*.npy
+
+# Calibración local
+.refractory_calibration.json
+.refractory_mobile.json
+.refractory_recent.json
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Env vars
+.env
+*.env
+
+# Kivy cache
+.kivy/

@@ -1,0 +1,16 @@
+# Normalizar line endings: LF en el repo, conversión automática en checkout
+* text=auto eol=lf
+
+# Binarios — sin conversión
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.apk binary
+*.npz binary
+*.npy binary
+*.zip binary
+*.glb binary
+*.stl binary
+
+# Windows batch — mantener CRLF
+*.bat text eol=crlf
