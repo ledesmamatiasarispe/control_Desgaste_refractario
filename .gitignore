@@ -26,7 +26,9 @@ android_app/_updates/
 pc_server/jobs/
 
 # Proyecto de usuario (datos, no código)
+# Excepción: samples/ sí va al repo como ejemplos
 *.refproj
+!samples/*.refproj
 *.npz
 *.npy
 

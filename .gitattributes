@@ -1,6 +1,5 @@
 # Normalizar line endings: LF en el repo, conversión automática en checkout
 * text=auto eol=lf
-
 # Binarios — sin conversión
 *.png binary
 *.jpg binary
@@ -11,6 +10,11 @@
 *.zip binary
 *.glb binary
 *.stl binary
-
 # Windows batch — mantener CRLF
 *.bat text eol=crlf
+samples/*.glb filter=lfs diff=lfs merge=lfs -text
+samples/*.stl filter=lfs diff=lfs merge=lfs -text
+samples/*.obj filter=lfs diff=lfs merge=lfs -text
+samples/*.ply filter=lfs diff=lfs merge=lfs -text
+samples/*.refproj filter=lfs diff=lfs merge=lfs -text
+samples/*.zip filter=lfs diff=lfs merge=lfs -text
