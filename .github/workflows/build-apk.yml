@@ -4,42 +4,43 @@ on:
   push:
     branches: [main]
     paths:
-      - "android_app/**"      # solo si cambia la app
-  workflow_dispatch:           # también se puede disparar manualmente
+      - "android_app/**"
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
-      # ── Checkout ──────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
 
-      # ── Python ────────────────────────────────────────────────────────────
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ── System deps requeridos por Buildozer ──────────────────────────────
+      # ── System deps ───────────────────────────────────────────────────────
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            git zip unzip openjdk-17-jdk \
-            build-essential libffi-dev libssl-dev \
-            libltdl-dev libjpeg-dev zlib1g-dev \
-            autoconf libtool pkg-config cmake \
-            ccache
+            git zip unzip curl wget \
+            openjdk-17-jdk \
+            build-essential \
+            libffi-dev libssl-dev libncurses5-dev \
+            libsqlite3-dev libreadline-dev libbz2-dev \
+            libltdl-dev libjpeg-dev libpng-dev \
+            zlib1g-dev autoconf libtool pkg-config cmake \
+            ccache lld
 
-      # ── Cache: Buildozer home (SDK/NDK) ───────────────────────────────────
+      # ── Cache Buildozer (SDK/NDK — ~3 GB, tarda 15 min sin cache) ────────
       - name: Cache Buildozer global dir
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-${{ hashFiles('android_app/buildozer.spec') }}
-          restore-keys: buildozer-
+          key: buildozer-v2-${{ hashFiles('android_app/buildozer.spec') }}
+          restore-keys: |
+            buildozer-v2-
 
-      # ── Cache: CCache para acelerar compilación C ─────────────────────────
       - name: Cache CCache
         uses: actions/cache@v4
         with:
@@ -47,36 +48,56 @@ jobs:
           key: ccache-${{ github.sha }}
           restore-keys: ccache-
 
-      # ── Buildozer ─────────────────────────────────────────────────────────
+      # ── Python build tools ────────────────────────────────────────────────
       - name: Install Buildozer + Cython
-        run: pip install --upgrade buildozer cython
+        run: |
+          pip install --upgrade pip
+          pip install --upgrade buildozer cython virtualenv
 
       # ── Leer versión ──────────────────────────────────────────────────────
       - name: Read app version
         id: ver
         run: |
-          VERSION=$(python -c "
-          import sys; sys.path.insert(0, 'android_app')
-          from version import VERSION; print(VERSION)")
+          VERSION=$(python android_app/version.py 2>/dev/null || \
+                    python -c "exec(open('android_app/version.py').read()); print(VERSION)")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "App version: $VERSION"
+          echo "Building version: $VERSION"
 
-      # ── Compilar APK ──────────────────────────────────────────────────────
+      # ── Compilar APK (pipefail para detectar errores de buildozer) ────────
       - name: Build debug APK
         working-directory: android_app
         env:
           CCACHE_DIR: ~/.ccache
         run: |
-          buildozer android debug 2>&1 | tail -50
+          set -o pipefail
+          buildozer android debug 2>&1 | tee /tmp/buildozer.log
+          echo "Exit code: $?"
 
-      # ── Renombrar APK con versión ─────────────────────────────────────────
+      # ── Mostrar log si falló ──────────────────────────────────────────────
+      - name: Show buildozer log on failure
+        if: failure()
+        run: |
+          echo "=== Last 100 lines of buildozer log ==="
+          tail -100 /tmp/buildozer.log || true
+          echo "=== APK search ==="
+          find android_app -name "*.apk" 2>/dev/null || echo "No APKs found"
+
+      # ── Renombrar APK ─────────────────────────────────────────────────────
       - name: Rename APK
         run: |
-          APK=$(ls android_app/bin/*.apk | head -1)
-          cp "$APK" "refractory-capture-v${{ steps.ver.outputs.version }}.apk"
-          echo "APK: refractory-capture-v${{ steps.ver.outputs.version }}.apk"
+          APK=$(find android_app/bin -name "*.apk" | head -1)
+          if [ -z "$APK" ]; then
+            echo "ERROR: No APK found in android_app/bin/"
+            ls -la android_app/bin/ || echo "bin/ does not exist"
+            exit 1
+          fi
+          echo "Found APK: $APK"
+          DEST="refractory-capture-v${{ steps.ver.outputs.version }}.apk"
+          cp "$APK" "$DEST"
+          echo "APK_PATH=$DEST" >> "$GITHUB_ENV"
+          ls -lh "$DEST"
 
-      # ── Publicar Release en GitHub ────────────────────────────────────────
+      # ── Publicar Release ──────────────────────────────────────────────────
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -86,13 +107,13 @@ jobs:
             ## Cambios
             Commit: ${{ github.sha }}
 
-            ### Instalación
-            1. Descargá el APK
-            2. Habilitá *Instalar apps desconocidas* para tu navegador/gestor de archivos
+            ### Cómo instalar
+            1. Descargá el `.apk`
+            2. En el celular: Configuración → Seguridad → activar *Instalar apps desconocidas*
             3. Abrí el APK e instalá
 
             > Si ya tenés la app instalada, se actualizará automáticamente al abrir la app.
-          files: refractory-capture-v${{ steps.ver.outputs.version }}.apk
+          files: ${{ env.APK_PATH }}
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
