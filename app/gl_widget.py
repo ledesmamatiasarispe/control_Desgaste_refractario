@@ -19,6 +19,7 @@ class Mode(Enum):
     ALIGN_3PT     = auto()
     CALIBRATE_3PT = auto()
     MEASURE       = auto()
+    CROP_CYLINDER = auto()
 
 
 @dataclass
@@ -34,6 +35,7 @@ class GLWidget(QOpenGLWidget):
     align_ready       = Signal(list)
     calibrate_ready   = Signal(list)
     measure_done      = Signal(object)   # Measurement
+    crop_ready        = Signal(list)     # 3 points for cylinder crop
     status_message    = Signal(str)
 
     def __init__(self, parent=None):
@@ -48,6 +50,10 @@ class GLWidget(QOpenGLWidget):
 
         self._last_mouse = None
         self._mouse_btn  = None
+
+        self._unit_factor   = 1.0
+        self._unit_suffix   = "mm"
+        self._unit_decimals = 3
         self._align_pts: List[np.ndarray] = []
 
         # Measurement state
@@ -131,6 +137,19 @@ class GLWidget(QOpenGLWidget):
         self._meas_pending = None
         self._refresh_measure_render()
 
+    def set_ref_mode(self, mode: str):
+        self._renderer.set_ref_mode(mode)
+        self.update()
+
+    def set_unit(self, factor: float, suffix: str, decimals: int):
+        self._unit_factor   = factor
+        self._unit_suffix   = suffix
+        self._unit_decimals = decimals
+        for m in self._measurements:
+            v = m.distance * factor
+            m.label = f"{v:.{decimals}f} {suffix}"
+        self.update()
+
     def apply_heatmap(self, colors: np.ndarray):
         self._heatmap = True
         self.makeCurrent()
@@ -157,6 +176,7 @@ class GLWidget(QOpenGLWidget):
             Mode.ALIGN_3PT:     "Alinear 3 puntos — seleccioná punto 1/3",
             Mode.CALIBRATE_3PT: "CALIBRAR — seleccioná punto de referencia 1/3",
             Mode.MEASURE:       "Medir distancia — clic en el primer punto",
+            Mode.CROP_CYLINDER: "Recortar cilindro — seleccioná punto 1/3 sobre el borde del crisol",
         }
         self.setCursor(
             Qt.CursorShape.ArrowCursor if mode == Mode.NAVIGATE
@@ -241,7 +261,8 @@ class GLWidget(QOpenGLWidget):
 
         if event.button() == Qt.MouseButton.LeftButton:
             if self._mode in (Mode.ANNOTATE, Mode.ALIGN_3PT,
-                              Mode.CALIBRATE_3PT, Mode.MEASURE):
+                              Mode.CALIBRATE_3PT, Mode.MEASURE,
+                              Mode.CROP_CYLINDER):
                 self._handle_pick(event.position())
 
     def mouseMoveEvent(self, event):
@@ -318,7 +339,8 @@ class GLWidget(QOpenGLWidget):
                 p1   = self._meas_pending
                 p2   = hit
                 dist = float(np.linalg.norm(p2 - p1))
-                label = f"{dist:.4f}"
+                v = dist * self._unit_factor
+                label = f"{v:.{self._unit_decimals}f} {self._unit_suffix}"
                 m = Measurement(p1=p1, p2=p2, distance=dist, label=label)
                 self._measurements.append(m)
                 self._meas_pending = None
@@ -327,24 +349,35 @@ class GLWidget(QOpenGLWidget):
                 self.status_message.emit(
                     f"Distancia: {label}  — clic para otra medición, Esc para salir")
 
-        elif self._mode in (Mode.ALIGN_3PT, Mode.CALIBRATE_3PT):
+        elif self._mode in (Mode.ALIGN_3PT, Mode.CALIBRATE_3PT, Mode.CROP_CYLINDER):
             is_calib = (self._mode == Mode.CALIBRATE_3PT)
+            is_crop  = (self._mode == Mode.CROP_CYLINDER)
             self._align_pts.append(hit)
             self._update_markers()
             n = len(self._align_pts)
-            prefix = "CALIBRAR" if is_calib else "Alinear"
+            if is_crop:
+                prefix = "Recortar cilindro"
+            elif is_calib:
+                prefix = "CALIBRAR"
+            else:
+                prefix = "Alinear"
             if n < 3:
                 self.status_message.emit(
                     f"{prefix} — seleccioná punto {n+1}/3")
             else:
-                self.status_message.emit(
-                    f"3 puntos — {'guardando calibración' if is_calib else 'aplicando alineación'}…")
+                if is_crop:
+                    self.status_message.emit("3 puntos seleccionados — calculando recorte…")
+                else:
+                    self.status_message.emit(
+                        f"3 puntos — {'guardando calibración' if is_calib else 'aplicando alineación'}…")
                 pts = self._align_pts.copy()
                 self._align_pts = []
                 self._update_markers()
                 self.set_mode(Mode.NAVIGATE)
                 if is_calib:
                     self.calibrate_ready.emit(pts)
+                elif is_crop:
+                    self.crop_ready.emit(pts)
                 else:
                     self.align_ready.emit(pts)
 
@@ -369,6 +402,59 @@ class GLWidget(QOpenGLWidget):
                               dtype=np.float32)
         self.makeCurrent()
         self._renderer.update_markers(positions, colors)
+        self.doneCurrent()
+        self.update()
+
+    def show_align_pts(self, pts):
+        """Show persistent alignment markers for the active scan (or clear if None/empty)."""
+        colors_map = [
+            [1.0, 0.2, 0.2, 1.0],
+            [0.2, 1.0, 0.2, 1.0],
+            [0.2, 0.5, 1.0, 1.0],
+        ]
+        if pts:
+            positions = np.array(pts, dtype=np.float32)
+            colors    = np.array(colors_map[:len(pts)], dtype=np.float32)
+        else:
+            positions = np.empty((0, 3), np.float32)
+            colors    = np.empty((0, 4), np.float32)
+        self.makeCurrent()
+        self._renderer.update_markers(positions, colors)
+        self.doneCurrent()
+        self.update()
+
+    def show_refinement_preview(self, original_pts, refined_pts):
+        """Show original clicks (yellow) + refined centroids (colored) + connecting lines.
+
+        Called just before alignment so the user can see how much each bolt
+        center was corrected before the mesh transforms.
+        """
+        colors_refined = [
+            [1.0, 0.2, 0.2, 1.0],
+            [0.2, 1.0, 0.2, 1.0],
+            [0.2, 0.5, 1.0, 1.0],
+        ]
+        _YELLOW = [1.0, 0.85, 0.1, 1.0]
+
+        all_pts  = list(refined_pts) + list(original_pts)
+        all_cols = colors_refined[:len(refined_pts)] + [_YELLOW] * len(original_pts)
+
+        # Lines connecting original → refined for each pair
+        seg_pts, seg_col = [], []
+        for orig, ref in zip(original_pts, refined_pts):
+            seg_pts.extend([orig, ref])
+            seg_col.extend([_YELLOW, _YELLOW])
+
+        mk_pos = np.array(all_pts,  dtype=np.float32) if all_pts  else np.empty((0,3), np.float32)
+        mk_col = np.array(all_cols, dtype=np.float32) if all_cols else np.empty((0,4), np.float32)
+        sg_pos = np.array(seg_pts,  dtype=np.float32) if seg_pts  else np.empty((0,3), np.float32)
+        sg_col = np.array(seg_col,  dtype=np.float32) if seg_col  else np.empty((0,4), np.float32)
+
+        self.makeCurrent()
+        self._renderer.update_markers(mk_pos, mk_col)
+        self._renderer.update_measurements(sg_pos, sg_col,
+                                           np.empty((0,3), np.float32),
+                                           np.empty((0,4), np.float32))
         self.doneCurrent()
         self.update()
 

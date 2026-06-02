@@ -18,7 +18,8 @@ from ui.panel       import CampaignPanel
 from core.loader    import MeshData, load_file
 from core.heatmap   import COLORMAPS
 from core.project   import (save_project, load_project, get_recent,
-                             PROJECT_FILTER, PROJECT_EXT)
+                             PROJECT_FILTER, PROJECT_EXT,
+                             CampaignData, ScanMeta)
 
 
 # ── background loader ────────────────────────────────────────────────────────
@@ -35,12 +36,25 @@ class _LoadWorker(QObject):
     def run(self):
         try:
             data = load_file(self.path)
+            data.source_path = self.path   # always store original path, not any temp path
             self.done.emit(data, self.name)
         except Exception as e:
             self.error.emit(str(e))
 
 
+# _ICPWorker removed — ICP now runs synchronously in the main thread
+# to avoid BLAS/LAPACK crashes from Qt worker threads.
+
+
 # ── main window ──────────────────────────────────────────────────────────────
+
+_UNITS = {
+    "mm":    (1.0,       "mm",    3),
+    "cm":    (0.1,       "cm",    4),
+    "m":     (0.001,     "m",     6),
+    "pulg.": (1/25.4,    "pulg.", 4),
+}
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -48,12 +62,21 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Refractory Analyzer")
         self.resize(1300, 800)
 
-        self._mesh_cache: Dict[int, MeshData] = {}
-        self._active_idx: Optional[int]        = None
+        self._mesh_cache: Dict[int, MeshData]     = {}
+        self._pristine_cache: Dict[int, MeshData] = {}   # mesh as originally loaded
+        self._active_idx: Optional[int]            = None
         self._load_thread: Optional[QThread]   = None
         self._align_ref_dist: Optional[float]  = None
-        self._project_path: Optional[str]       = None   # current .refproj path
-        self._dirty: bool                       = False  # unsaved changes
+        self._project_path: Optional[str]        = None
+        self._campaign_data: Optional[CampaignData] = None
+        self._dirty: bool                        = False
+
+        self._unit_factor   = 1.0
+        self._unit_suffix   = "mm"
+        self._unit_decimals = 3
+        self._raw_radius: Optional[float] = None
+        self._wear_vmax:  float           = 0.0
+        self._modified_mesh_paths: set    = set()   # paths written by this session
 
         self._calib_file = pathlib.Path.home() / ".refractory_calibration.json"
 
@@ -62,6 +85,9 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_status()
         self._load_calibration()
+
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self._restore_last_project)
 
     # ── UI construction ──────────────────────────────────────────────────────
 
@@ -86,6 +112,7 @@ class MainWindow(QMainWindow):
         self._gl.align_ready.connect(self._on_align_ready)
         self._gl.calibrate_ready.connect(self._on_calibrate_ready)
         self._gl.measure_done.connect(self._on_measurement)
+        self._gl.crop_ready.connect(self._on_crop_ready)
 
         # Right panel
         right = self._build_right_panel()
@@ -98,6 +125,10 @@ class MainWindow(QMainWindow):
         splitter.setSizes([900, 260])
         root.addWidget(splitter)
 
+    def _fmt(self, raw: float) -> str:
+        v = raw * self._unit_factor
+        return f"{v:.{self._unit_decimals}f} {self._unit_suffix}"
+
     def _build_right_panel(self) -> QWidget:
         w = QWidget()
         w.setFixedWidth(260)
@@ -107,6 +138,20 @@ class MainWindow(QMainWindow):
         title = QLabel("Propiedades")
         title.setFont(QFont("", 10, QFont.Weight.Bold))
         layout.addWidget(title)
+
+        # Unit selector
+        unit_row = QWidget()
+        ulay = QHBoxLayout(unit_row)
+        ulay.setContentsMargins(0, 0, 0, 4)
+        ulay.addWidget(QLabel("Unidad:"))
+        self._cbo_units = QComboBox()
+        for u in _UNITS:
+            self._cbo_units.addItem(u)
+        self._cbo_units.setMaximumWidth(80)
+        self._cbo_units.currentTextChanged.connect(self._on_unit_change)
+        ulay.addWidget(self._cbo_units)
+        ulay.addStretch()
+        layout.addWidget(unit_row)
 
         # Mesh stats
         grp_mesh = QGroupBox("Malla activa")
@@ -160,6 +205,15 @@ class MainWindow(QMainWindow):
         self._colorbar_lbl.setFixedSize(220, 16)
         self._colorbar_lbl.setScaledContents(True)
         form_cmap.addWidget(self._colorbar_lbl)
+
+        scale_row = QHBoxLayout()
+        self._lbl_scale_min = QLabel("0")
+        self._lbl_scale_max = QLabel("—")
+        scale_row.addWidget(self._lbl_scale_min)
+        scale_row.addStretch()
+        scale_row.addWidget(self._lbl_scale_max)
+        form_cmap.addLayout(scale_row)
+
         layout.addWidget(grp_cmap)
 
         sep3 = QFrame(); sep3.setFrameShape(QFrame.Shape.HLine)
@@ -218,12 +272,12 @@ class MainWindow(QMainWindow):
         # ── File ──
         file_menu = mb.addMenu("Archivo")
 
-        act_new = QAction("Nuevo proyecto", self)
+        act_new = QAction("Nueva campaña", self)
         act_new.setShortcut("Ctrl+N")
         act_new.triggered.connect(self._new_project)
         file_menu.addAction(act_new)
 
-        act_open = QAction("Abrir proyecto…", self)
+        act_open = QAction("Abrir campaña…", self)
         act_open.setShortcut("Ctrl+O")
         act_open.triggered.connect(self._open_project)
         file_menu.addAction(act_open)
@@ -234,15 +288,21 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        act_save = QAction("Guardar proyecto", self)
+        act_save = QAction("Guardar campaña", self)
         act_save.setShortcut("Ctrl+S")
         act_save.triggered.connect(self._save_project)
         file_menu.addAction(act_save)
 
-        act_saveas = QAction("Guardar proyecto como…", self)
+        act_saveas = QAction("Guardar campaña como…", self)
         act_saveas.setShortcut("Ctrl+Shift+S")
         act_saveas.triggered.connect(self._save_project_as)
         file_menu.addAction(act_saveas)
+
+        file_menu.addSeparator()
+
+        act_close_camp = QAction("🔒 Cerrar campaña", self)
+        act_close_camp.triggered.connect(self._close_campaign)
+        file_menu.addAction(act_close_camp)
 
         file_menu.addSeparator()
         act_quit = QAction("Salir", self)
@@ -285,6 +345,16 @@ class MainWindow(QMainWindow):
                                tip="Alinear esta malla usando los 3 puntos calibrados")
         self._act_measure = act("📏 Medir",        "M",  checkable=True,
                                tip="Medir distancia entre dos puntos (misma malla o entre dos mallas)")
+        self._act_crop       = act("⭕ Recortar crisol", "C", checkable=True,
+                                   tip="Seleccioná 3 puntos en el borde del crisol para recortar el exterior")
+        self._act_ref_volume = act("🫧 Volumen desgaste", None, checkable=True,
+                                   tip="Mostrar referencia como sólido transparente para ver el volumen de material perdido")
+        self._act_icp    = act("🎯 ICP tornillos", None,
+                               tip="Refinar alineación con ICP usando solo la geometría cerca de los tornillos")
+        self._act_icp.setEnabled(False)
+        self._act_icp_full = act("🎯 ICP general", None,
+                                 tip="Refinar alineación con ICP usando el mesh completo")
+        self._act_icp_full.setEnabled(False)
         self._act_hmap   = act("⬛ Quitar mapa",   None, tip="Volver a color base")
 
         self._act_nav.setChecked(True)
@@ -297,7 +367,11 @@ class MainWindow(QMainWindow):
         tb.addAction(self._act_calib)
         tb.addAction(self._act_align)
         tb.addAction(self._act_measure)
+        tb.addAction(self._act_crop)
         tb.addSeparator()
+        tb.addAction(self._act_ref_volume)
+        tb.addAction(self._act_icp)
+        tb.addAction(self._act_icp_full)
         tb.addAction(self._act_hmap)
 
         self._act_fit.triggered.connect(self._gl.fit_view)
@@ -306,6 +380,12 @@ class MainWindow(QMainWindow):
         self._act_calib.triggered.connect(lambda: self._set_mode(Mode.CALIBRATE_3PT))
         self._act_align.triggered.connect(lambda: self._set_mode(Mode.ALIGN_3PT))
         self._act_measure.triggered.connect(lambda: self._set_mode(Mode.MEASURE))
+        self._act_crop.triggered.connect(lambda: self._set_mode(Mode.CROP_CYLINDER))
+        self._act_ref_volume.toggled.connect(
+            lambda on: self._gl.set_ref_mode("solid_transparent" if on else "wireframe")
+        )
+        self._act_icp.triggered.connect(lambda: self._run_icp(near_bolts=True))
+        self._act_icp_full.triggered.connect(lambda: self._run_icp(near_bolts=False))
         self._act_hmap.triggered.connect(self._clear_heatmap)
 
     def _build_status(self):
@@ -315,6 +395,35 @@ class MainWindow(QMainWindow):
         sb.addWidget(self._status_main, 1)
         self._gl.status_message.connect(self._status_main.setText)
 
+    # ── startup restore ──────────────────────────────────────────────────────
+
+    def _restore_last_project(self):
+        recent = get_recent()
+        if recent:
+            self._open_project_path(recent[0])
+
+    # ── unit selector ────────────────────────────────────────────────────────
+
+    def _on_unit_change(self, unit: str):
+        self._unit_factor, self._unit_suffix, self._unit_decimals = _UNITS[unit]
+        self._gl.set_unit(self._unit_factor, self._unit_suffix, self._unit_decimals)
+        self._refresh_unit_labels()
+
+    def _refresh_unit_labels(self):
+        if self._raw_radius is not None:
+            self._lbl_radius.setText(self._fmt(self._raw_radius))
+        if hasattr(self, '_current_wear_result'):
+            r = self._current_wear_result
+            self._lbl_max.setText(self._fmt(r.max_wear))
+            self._lbl_mean.setText(self._fmt(r.mean_wear))
+            self._lbl_p95.setText(self._fmt(r.p95_wear))
+        if self._align_ref_dist is not None:
+            self._lbl_ref_dist.setText(f"{self._fmt(self._align_ref_dist)}  ✓ calibrado")
+        meas = self._gl._measurements
+        if meas:
+            lines = [f"{i+1}:  {m.label}" for i, m in enumerate(meas)]
+            self._meas_list.setText("\n".join(lines))
+
     # ── mode helpers ─────────────────────────────────────────────────────────
 
     def _set_mode(self, mode: Mode):
@@ -322,6 +431,7 @@ class MainWindow(QMainWindow):
         self._act_calib.setChecked(mode == Mode.CALIBRATE_3PT)
         self._act_align.setChecked(mode == Mode.ALIGN_3PT)
         self._act_measure.setChecked(mode == Mode.MEASURE)
+        self._act_crop.setChecked(mode == Mode.CROP_CYLINDER)
         self._gl.set_mode(mode)
 
     # ── campaign slots ───────────────────────────────────────────────────────
@@ -340,9 +450,27 @@ class MainWindow(QMainWindow):
         self._load_thread.start()
 
     def _on_mesh_loaded(self, data: MeshData, name: str):
+        from datetime import datetime
+        from uuid import uuid4
+        now = datetime.now().isoformat()
         idx = self._panel.count()  # index before adding
-        self._panel.add_campaign(name, data.source_path)
-        self._mesh_cache[idx] = data
+
+        if self._campaign_data is None:
+            self._campaign_data = CampaignData(
+                id=str(uuid4()), name="", scans=[], meshes=[],
+                calibration=None, start_date=now, end_date=None,
+            )
+        elif not self._campaign_data.start_date:
+            self._campaign_data.start_date = now
+
+        self._campaign_data.scans.append(ScanMeta(
+            id=str(uuid4()), name=name,
+            source_path=data.source_path, load_date=now,
+        ))
+
+        self._panel.add_scan(name, data.source_path, load_date=now)
+        self._mesh_cache[idx]     = data
+        self._pristine_cache[idx] = data   # never overwritten — always the raw loaded mesh
         self._select_mesh(idx)
         self._mark_dirty()
 
@@ -354,24 +482,67 @@ class MainWindow(QMainWindow):
         self._select_mesh(index)
 
     def _on_remove(self, index: int):
+        if self._campaign_data and 0 <= index < len(self._campaign_data.scans):
+            self._campaign_data.scans.pop(index)
+
         self._mesh_cache.pop(index, None)
+        self._pristine_cache.pop(index, None)
         # Re-index cache keys above the removed index
-        new_cache = {}
+        new_cache, new_pristine = {}, {}
         for k, v in self._mesh_cache.items():
-            if k < index:
-                new_cache[k] = v
-            elif k > index:
-                new_cache[k - 1] = v
-        self._mesh_cache = new_cache
-        self._panel.remove_campaign(index)
+            new_cache[k if k < index else k - 1] = v
+        for k, v in self._pristine_cache.items():
+            new_pristine[k if k < index else k - 1] = v
+        self._mesh_cache     = new_cache
+        self._pristine_cache = new_pristine
+        self._panel.remove_scan(index)
 
         if self._active_idx == index:
             self._active_idx = None
             if self._panel.count() > 0:
                 self._select_mesh(min(index, self._panel.count() - 1))
 
+
     def _on_compare(self, ref: int, cur: int):
         pass  # comparison is handled directly by ComparisonDialog
+
+    # ── base scan helpers ────────────────────────────────────────────────────
+
+    def _base_idx(self) -> Optional[int]:
+        """Index of the calibrated (base) scan, or None if not set."""
+        if self._campaign_data and self._campaign_data.calibrated_scan_idx is not None:
+            return self._campaign_data.calibrated_scan_idx
+        return None
+
+    def _base_mesh(self):
+        idx = self._base_idx()
+        return self._mesh_cache.get(idx) if idx is not None else None
+
+    # ── ICP button state ─────────────────────────────────────────────────────
+
+    def _refresh_icp_btn(self, idx=None):
+        if idx is None:
+            idx = self._active_idx
+        scan = (self._campaign_data.scans[idx]
+                if self._campaign_data and idx is not None
+                   and idx < len(self._campaign_data.scans)
+                else None)
+        base_idx    = self._base_idx()
+        base_ready  = (idx is not None and base_idx is not None
+                       and idx != base_idx and self._base_mesh() is not None)
+        has_pts     = scan is not None and bool(scan.align_pts)
+        self._act_icp.setEnabled(base_ready and has_pts)
+        self._act_icp_full.setEnabled(base_ready)
+
+    # ── align markers ────────────────────────────────────────────────────────
+
+    def _show_scan_align_pts(self, idx):
+        """Restore the stored alignment markers for the given scan index."""
+        scan = (self._campaign_data.scans[idx]
+                if self._campaign_data and idx is not None
+                   and idx < len(self._campaign_data.scans)
+                else None)
+        self._gl.show_align_pts(scan.align_pts if scan else None)
 
     # ── mesh selection ───────────────────────────────────────────────────────
 
@@ -382,12 +553,15 @@ class MainWindow(QMainWindow):
             return
         self._gl.load_mesh(data)
         self._gl.set_reference_mesh(None)   # clear reference when selecting alone
+        self._raw_radius = data.radius
         self._lbl_verts.setText(f"{data.vertex_count:,}")
         self._lbl_faces.setText(f"{data.face_count:,}")
-        self._lbl_radius.setText(f"{data.radius:.3f}")
+        self._lbl_radius.setText(self._fmt(data.radius))
         self._lbl_max.setText("—")
         self._lbl_mean.setText("—")
         self._lbl_p95.setText("—")
+        self._show_scan_align_pts(index)
+        self._refresh_icp_btn(index)
 
     # ── clip planes ──────────────────────────────────────────────────────────
 
@@ -415,12 +589,13 @@ class MainWindow(QMainWindow):
         self._gl.apply_heatmap(colors)
         self._gl.set_reference_mesh(ref_data)
 
+        self._raw_radius = cur_data.radius
         self._lbl_verts.setText(f"{cur_data.vertex_count:,}")
         self._lbl_faces.setText(f"{cur_data.face_count:,}")
-        self._lbl_radius.setText(f"{cur_data.radius:.3f}")
-        self._lbl_max.setText(f"{result.max_wear:.3f}")
-        self._lbl_mean.setText(f"{result.mean_wear:.3f}")
-        self._lbl_p95.setText(f"{result.p95_wear:.3f}")
+        self._lbl_radius.setText(self._fmt(cur_data.radius))
+        self._lbl_max.setText(self._fmt(result.max_wear))
+        self._lbl_mean.setText(self._fmt(result.mean_wear))
+        self._lbl_p95.setText(self._fmt(result.p95_wear))
 
         self._current_wear_result   = result
         self._current_wear_cmap     = self._cbo_cmap.currentText()
@@ -433,9 +608,9 @@ class MainWindow(QMainWindow):
     def show_heatmap(self, mesh_idx: int, colors: np.ndarray, result):
         self._select_mesh(mesh_idx)
         self._gl.apply_heatmap(colors)
-        self._lbl_max.setText(f"{result.max_wear:.3f}")
-        self._lbl_mean.setText(f"{result.mean_wear:.3f}")
-        self._lbl_p95.setText(f"{result.p95_wear:.3f}")
+        self._lbl_max.setText(self._fmt(result.max_wear))
+        self._lbl_mean.setText(self._fmt(result.mean_wear))
+        self._lbl_p95.setText(self._fmt(result.p95_wear))
         self._current_wear_result  = result
         self._current_wear_cmap    = self._cbo_cmap.currentText()
         self._current_wear_mesh_idx = mesh_idx
@@ -450,11 +625,12 @@ class MainWindow(QMainWindow):
     def _on_cmap_change(self, cmap_name: str):
         if hasattr(self, '_current_wear_result'):
             from core.heatmap import distances_to_colors
-            colors = distances_to_colors(
+            colors, vmax = distances_to_colors(
                 self._current_wear_result.distances,
                 colormap=cmap_name,
             )
             self._current_wear_cmap = cmap_name
+            self._wear_vmax = vmax
             self._gl.apply_heatmap(colors)
             self._update_colorbar()
 
@@ -466,6 +642,73 @@ class MainWindow(QMainWindow):
         h, w  = img.shape[:2]
         qi    = QImage(img.data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
         self._colorbar_lbl.setPixmap(QPixmap.fromImage(qi))
+        if self._wear_vmax > 0:
+            self._lbl_scale_min.setText(self._fmt(0))
+            self._lbl_scale_max.setText(self._fmt(self._wear_vmax))
+
+    # ── modified mesh persistence ────────────────────────────────────────────
+
+    def _save_modified_mesh(self, data: MeshData, idx: int, suffix: str) -> str:
+        """
+        Export the modified mesh as a PLY file.
+        - Primera modificación: crea un archivo nuevo junto al original.
+        - Modificaciones posteriores: sobreescribe el mismo archivo (source_path ya es nuestro).
+        Actualiza data.source_path y retorna la ruta.
+        """
+        import trimesh as _trimesh
+
+        current = data.source_path or ""
+        if current in self._modified_mesh_paths and pathlib.Path(current).exists():
+            out_path = current          # sobreescribir archivo previo
+        else:
+            orig = pathlib.Path(current) if current else None
+            if orig and orig.parent.exists():
+                save_dir  = orig.parent
+                base_name = orig.stem
+            else:
+                save_dir = pathlib.Path.home() / ".refractory_modified"
+                save_dir.mkdir(exist_ok=True)
+                scan = self._panel.get_scan(idx)
+                base_name = scan.name if scan else f"mesh_{idx}"
+
+            candidate = save_dir / f"{base_name}_{suffix}.ply"
+            n = 1
+            while candidate.exists():
+                candidate = save_dir / f"{base_name}_{suffix}_{n}.ply"
+                n += 1
+            out_path = str(candidate)
+
+        tm = _trimesh.Trimesh(
+            vertices=data.vertices,
+            faces=data.faces,
+            vertex_normals=data.normals,
+            process=False,
+        )
+        tm.export(out_path)
+        self._modified_mesh_paths.add(out_path)
+        data.source_path = out_path
+        return out_path
+
+    # ── close campaign ───────────────────────────────────────────────────────
+
+    def _close_campaign(self):
+        from datetime import datetime
+        if self._campaign_data is None:
+            QMessageBox.information(self, "Cerrar campaña",
+                "No hay ninguna campaña abierta.")
+            return
+        if self._campaign_data.end_date:
+            QMessageBox.information(self, "Cerrar campaña",
+                "Esta campaña ya fue cerrada.")
+            return
+        self._campaign_data.end_date = datetime.now().isoformat()
+        if self._project_path:
+            self._do_save(self._project_path)
+            self._status_main.setText("Campaña cerrada ✓")
+        else:
+            QMessageBox.information(self, "Cerrar campaña",
+                "Guardá la campaña primero (Ctrl+S) para registrar el cierre.")
+            self._campaign_data.end_date = None   # revert
 
     # ── 3-point calibration & alignment ─────────────────────────────────────
 
@@ -478,7 +721,7 @@ class MainWindow(QMainWindow):
                 if dist > 0:
                     self._align_ref_dist = dist
                     self._lbl_ref_dist.setText(
-                        f"{dist:.6f}  ✓ calibrado"
+                        f"{self._fmt(dist)}  ✓ calibrado"
                     )
         except Exception:
             pass  # corrupted file — ignore
@@ -499,35 +742,84 @@ class MainWindow(QMainWindow):
         self._status_main.setText("Calibración de escala eliminada.")
 
     def _on_calibrate_ready(self, pts: list):
-        """3 pts picked in CALIBRATE mode — save as reference, align this mesh."""
+        """3 pts picked in CALIBRATE mode — show distance dialog, save reference, align."""
         from core.alignment import three_point_align
+        from ui.calibration_dialog import CalibrationDistanceDialog
         idx  = self._active_idx
-        data = self._mesh_cache.get(idx) if idx is not None else None
+        data = self._pristine_cache.get(idx) if idx is not None else None
         if data is None:
             return
         try:
-            p1, p2 = pts[0], pts[1]
-            ref_dist = float(np.linalg.norm((p2 - p1).astype(np.float64)))
+            from core.alignment import refine_pts_to_local_centroid
+            from PySide6.QtWidgets import QApplication
+            raw = [p.tolist() for p in (pts[0], pts[1], pts[2])]
+            ref = refine_pts_to_local_centroid(raw, data.vertices)
+            p1 = np.array(ref[0], dtype=np.float32)
+            p2 = np.array(ref[1], dtype=np.float32)
+            p3 = np.array(ref[2], dtype=np.float32)
+
+            # Show original clicks (yellow) vs refined centroids (colored) before transforming
+            self._gl.show_refinement_preview(raw, ref)
+            QApplication.processEvents()
+
+            meas_12 = float(np.linalg.norm((p2 - p1).astype(np.float64)))
+            meas_13 = float(np.linalg.norm((p3 - p1).astype(np.float64)))
+            meas_23 = float(np.linalg.norm((p3 - p2).astype(np.float64)))
+
+            dlg = CalibrationDistanceDialog(
+                meas_12, meas_13, meas_23,
+                self._unit_factor, self._unit_suffix,
+                parent=self,
+            )
+            if dlg.exec() != CalibrationDistanceDialog.DialogCode.Accepted:
+                self._status_main.setText("Calibración cancelada.")
+                return
+
+            ref_dist = dlg.ref_dist_mm()
 
             self._align_ref_dist = ref_dist
             self._save_calibration(ref_dist)
-            self._lbl_ref_dist.setText(f"{ref_dist:.6f}  ✓ calibrado")
+            self._lbl_ref_dist.setText(f"{self._fmt(ref_dist)}  ✓ calibrado")
 
-            aligned = three_point_align(data, pts[0], pts[1], pts[2])
+            aligned, T4, scale = three_point_align(data, pts[0], pts[1], pts[2],
+                                                  target_dist=ref_dist)
+            try:
+                saved = self._save_modified_mesh(aligned, idx, "calibrado")
+                self._status_main.setText(
+                    f"✓ Calibración guardada — dist P1→P2 ref: {self._fmt(ref_dist)} — {saved}"
+                )
+            except Exception as save_err:
+                self._status_main.setText(
+                    f"✓ Calibración aplicada (no pudo guardarse en disco: {save_err})"
+                )
+            # Mark this scan as the campaign base
+            if self._campaign_data:
+                self._campaign_data.calibrated_scan_idx = idx
+
+            # Store calibration points transformed to the new coordinate space
+            _R = T4[:3, :3].astype(np.float64)
+            _t = T4[:3,  3].astype(np.float64)
+            def _xpt(p):
+                return (scale * (_R @ p.astype(np.float64) + _t)).tolist()
+            if self._campaign_data and idx is not None \
+                    and idx < len(self._campaign_data.scans):
+                self._campaign_data.scans[idx].align_pts = [
+                    _xpt(p1), _xpt(p2), _xpt(p3)
+                ]
             self._mesh_cache[idx] = aligned
             self._gl.load_mesh(aligned)
+            self._show_scan_align_pts(idx)
             self._mark_dirty()
-            self._status_main.setText(
-                f"✓ Calibración guardada — dist P1→P2: {ref_dist:.6f}"
-            )
-        except ValueError as e:
-            QMessageBox.warning(self, "Calibración", str(e))
+        except Exception as e:
+            import traceback
+            QMessageBox.critical(self, "Error de calibración",
+                                 f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}")
 
     def _on_align_ready(self, pts: list):
         """3 pts picked in ALIGN mode — apply alignment + scale to calibration."""
         from core.alignment import three_point_align
         idx  = self._active_idx
-        data = self._mesh_cache.get(idx) if idx is not None else None
+        data = self._pristine_cache.get(idx) if idx is not None else None
         if data is None:
             return
         if self._align_ref_dist is None:
@@ -538,22 +830,191 @@ class MainWindow(QMainWindow):
             )
             return
         try:
-            p1, p2 = pts[0], pts[1]
-            current_dist = float(np.linalg.norm((p2 - p1).astype(np.float64)))
-            scale_factor = self._align_ref_dist / current_dist
+            from core.alignment import umeyama_align
 
-            aligned = three_point_align(
-                data, pts[0], pts[1], pts[2],
-                target_dist=self._align_ref_dist
-            )
+            # Use Umeyama if calibration pts from scan 0 are available:
+            # maps the 3 freshly picked raw pts → the 3 calibrated target pts,
+            # finding optimal scale + R + t simultaneously (robust to noisy picks).
+            # Fall back to single-ratio three_point_align if no calibration pts.
+            base_idx = self._base_idx()
+            base_scan = (self._campaign_data.scans[base_idx]
+                         if self._campaign_data and base_idx is not None
+                            and base_idx < len(self._campaign_data.scans)
+                         else None)
+            base_align_pts = base_scan.align_pts if base_scan else None
+
+            if base_align_pts is not None:
+                from core.alignment import refine_pts_to_local_centroid
+                from PySide6.QtWidgets import QApplication
+                raw_pts = [p.tolist() for p in (pts[0], pts[1], pts[2])]
+                src_pts_raw = refine_pts_to_local_centroid(raw_pts, data.vertices)
+
+                # Show original clicks (yellow) vs refined centroids (colored)
+                self._gl.show_refinement_preview(raw_pts, src_pts_raw)
+                QApplication.processEvents()
+
+                aligned, T4, scale = umeyama_align(data, src_pts_raw, base_align_pts)
+            else:
+                p1, p2 = pts[0], pts[1]
+                current_dist = float(np.linalg.norm((p2 - p1).astype(np.float64)))
+                scale = self._align_ref_dist / current_dist
+                aligned, T4, scale = three_point_align(
+                    data, pts[0], pts[1], pts[2],
+                    target_dist=self._align_ref_dist
+                )
+
+            try:
+                saved = self._save_modified_mesh(aligned, idx, "alineado")
+                self._status_main.setText(
+                    f"✓ Alineado — escala ×{scale:.4f} — {saved}"
+                )
+            except Exception as save_err:
+                self._status_main.setText(
+                    f"✓ Alineado ×{scale:.4f} (no pudo guardarse: {save_err})"
+                )
+            # Store transformed alignment points
+            _R = T4[:3, :3].astype(np.float64)
+            _t = T4[:3,  3].astype(np.float64)
+            def _xpt(p):
+                return (scale * (_R @ p.astype(np.float64) + _t)).tolist()
+            if self._campaign_data and idx < len(self._campaign_data.scans):
+                self._campaign_data.scans[idx].align_pts = [
+                    _xpt(pts[0]), _xpt(pts[1]), _xpt(pts[2])
+                ]
             self._mesh_cache[idx] = aligned
             self._gl.load_mesh(aligned)
+            self._show_scan_align_pts(idx)
             self._mark_dirty()
-            self._status_main.setText(
-                f"✓ Alineado y escalado ×{scale_factor:.4f}"
-            )
+            self._refresh_icp_btn(idx)
+        except Exception as e:  # noqa: BLE001
+            import traceback
+            QMessageBox.critical(self, "Error de alineación",
+                                 f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}")
+
+    def _run_icp(self, near_bolts: bool = True):
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import Qt
+        from core.alignment import icp_align, icp_align_near_pts
+
+        idx      = self._active_idx
+        base_idx = self._base_idx()
+        cur_mesh = self._mesh_cache.get(idx) if idx is not None else None
+        ref_mesh = self._base_mesh()
+        if cur_mesh is None or ref_mesh is None or idx == base_idx:
+            return
+
+        if near_bolts:
+            src_pts = (self._campaign_data.scans[idx].align_pts
+                       if self._campaign_data and idx < len(self._campaign_data.scans)
+                       else None)
+            tgt_pts = (self._campaign_data.scans[base_idx].align_pts
+                       if self._campaign_data and base_idx is not None
+                          and base_idx < len(self._campaign_data.scans)
+                       else None)
+            patch_radius = cur_mesh.radius * 0.15
+            label = "cerca de los tornillos"
+        else:
+            src_pts = tgt_pts = patch_radius = None
+            label = "general"
+
+        self._act_icp.setEnabled(False)
+        self._act_icp_full.setEnabled(False)
+        self._status_main.setText(f"Refinando con ICP {label}…")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
+        try:
+            if near_bolts and src_pts and tgt_pts:
+                refined = icp_align_near_pts(cur_mesh, ref_mesh,
+                                             src_pts, tgt_pts, patch_radius)
+            else:
+                refined = icp_align(cur_mesh, ref_mesh, pre_align=False)
+            refined.source_path = cur_mesh.source_path
+            self._on_icp_done(refined, idx)
+        except Exception as e:
+            self._on_icp_error(str(e))
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _on_icp_done(self, refined: MeshData, idx: int):
+        try:
+            saved = self._save_modified_mesh(refined, idx, "alineado")
+            self._status_main.setText(f"✓ Alineación refinada con ICP — {saved}")
+        except Exception as e:
+            self._status_main.setText(f"✓ ICP completado (no pudo guardarse: {e})")
+        self._mesh_cache[idx] = refined
+        self._gl.load_mesh(refined)
+        self._show_scan_align_pts(idx)
+        self._mark_dirty()
+        self._refresh_icp_btn(idx)
+
+    def _on_icp_error(self, msg: str):
+        self._status_main.setText(f"Error en ICP: {msg}")
+        self._refresh_icp_btn()
+
+    # ── cylinder crop ────────────────────────────────────────────────────────
+
+    def _on_crop_ready(self, pts: list):
+        from core.crop import circumscribed_circle, crop_cylinder
+        idx  = self._active_idx
+        data = self._mesh_cache.get(idx) if idx is not None else None
+        if data is None:
+            return
+        try:
+            center, radius, axis = circumscribed_circle(pts[0], pts[1], pts[2])
         except ValueError as e:
-            QMessageBox.warning(self, "Alineación", str(e))
+            QMessageBox.warning(self, "Recorte", str(e))
+            return
+
+        try:
+            cropped = crop_cylinder(data, center, radius, axis)
+        except ValueError as e:
+            QMessageBox.warning(self, "Recorte", str(e))
+            return
+
+        # Show preview
+        self._gl.load_mesh(cropped)
+        self._raw_radius = cropped.radius
+        self._lbl_verts.setText(f"{cropped.vertex_count:,}")
+        self._lbl_faces.setText(f"{cropped.face_count:,}")
+        self._lbl_radius.setText(self._fmt(cropped.radius))
+
+        eliminadas = data.face_count - cropped.face_count
+        msg = (
+            f"<b>Vista previa del recorte</b><br><br>"
+            f"Radio del círculo: <b>{self._fmt(radius)}</b><br>"
+            f"Caras originales: {data.face_count:,}<br>"
+            f"Caras resultantes: {cropped.face_count:,}<br>"
+            f"Caras eliminadas: {eliminadas:,}<br><br>"
+            f"¿Guardar este recorte?"
+        )
+        r = QMessageBox.question(
+            self, "Confirmar recorte", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if r == QMessageBox.StandardButton.Yes:
+            try:
+                saved = self._save_modified_mesh(cropped, idx, "recortado")
+                self._status_main.setText(
+                    f"✓ Recorte guardado — radio {self._fmt(radius)}, "
+                    f"{cropped.face_count:,} caras — {saved}"
+                )
+            except Exception as save_err:
+                self._status_main.setText(
+                    f"✓ Recorte aplicado (no pudo guardarse: {save_err})"
+                )
+            self._mesh_cache[idx]     = cropped
+            self._pristine_cache[idx] = cropped   # crop updates the alignment base
+            self._show_scan_align_pts(idx)
+            self._mark_dirty()
+        else:
+            # Discard: restore original
+            self._gl.load_mesh(data)
+            self._raw_radius = data.radius
+            self._lbl_verts.setText(f"{data.vertex_count:,}")
+            self._lbl_faces.setText(f"{data.face_count:,}")
+            self._lbl_radius.setText(self._fmt(data.radius))
+            self._show_scan_align_pts(idx)
+            self._status_main.setText("Recorte descartado.")
 
     # ── measurements ─────────────────────────────────────────────────────────
 
@@ -574,8 +1035,8 @@ class MainWindow(QMainWindow):
     def _new_project(self):
         if self._dirty and self._panel.count() > 0:
             r = QMessageBox.question(
-                self, "Nuevo proyecto",
-                "Hay cambios sin guardar. ¿Descartarlos y empezar uno nuevo?",
+                self, "Nueva campaña",
+                "Hay cambios sin guardar. ¿Descartarlos y empezar una nueva?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if r != QMessageBox.StandardButton.Yes:
@@ -584,17 +1045,19 @@ class MainWindow(QMainWindow):
 
     def _clear_all(self):
         for i in range(self._panel.count() - 1, -1, -1):
-            self._panel.remove_campaign(i)
+            self._panel.remove_scan(i)
         self._mesh_cache.clear()
-        self._active_idx   = None
-        self._project_path = None
-        self._dirty        = False
+        self._pristine_cache.clear()
+        self._active_idx    = None
+        self._project_path  = None
+        self._campaign_data = None
+        self._dirty         = False
         self.setWindowTitle("Refractory Analyzer")
-        self._status_main.setText("Proyecto nuevo")
+        self._status_main.setText("Nueva campaña")
 
     def _save_project(self):
         if self._panel.count() == 0:
-            QMessageBox.information(self, "Guardar", "No hay campañas cargadas.")
+            QMessageBox.information(self, "Guardar", "No hay escaneos cargados.")
             return
         if self._project_path is None:
             self._save_project_as()
@@ -603,10 +1066,10 @@ class MainWindow(QMainWindow):
 
     def _save_project_as(self):
         if self._panel.count() == 0:
-            QMessageBox.information(self, "Guardar", "No hay campañas cargadas.")
+            QMessageBox.information(self, "Guardar", "No hay escaneos cargados.")
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Guardar proyecto", "", PROJECT_FILTER
+            self, "Guardar campaña", "", PROJECT_FILTER
         )
         if not path:
             return
@@ -615,25 +1078,45 @@ class MainWindow(QMainWindow):
         self._do_save(path)
 
     def _do_save(self, path: str):
-        names     = [self._panel.get_campaign(i).name
-                     for i in range(self._panel.count())]
-        mesh_list = [self._mesh_cache[i]
-                     for i in range(self._panel.count())
+        from datetime import datetime
+        from uuid import uuid4
+        count     = self._panel.count()
+        mesh_list = [self._mesh_cache[i] for i in range(count)
                      if i in self._mesh_cache]
 
-        if len(mesh_list) != len(names):
+        if len(mesh_list) != count:
             QMessageBox.warning(self, "Guardar",
-                "Algunas mallas todavía se están cargando. Esperá e intentá de nuevo.")
+                "Algunos escaneos todavía se están cargando. Esperá e intentá de nuevo.")
             return
 
-        self._status_main.setText("Guardando proyecto…")
+        self._status_main.setText("Guardando campaña…")
         try:
             proj_name = pathlib.Path(path).stem
-            save_project(
-                path, names, mesh_list,
-                calibration   = self._align_ref_dist,
-                project_name  = proj_name,
-            )
+            now = datetime.now().isoformat()
+
+            if self._campaign_data is None:
+                scans = [
+                    ScanMeta(id=str(uuid4()),
+                             name=self._panel.get_scan(i).name,
+                             source_path=mesh_list[i].source_path,
+                             load_date=now)
+                    for i in range(count)
+                ]
+                self._campaign_data = CampaignData(
+                    id=str(uuid4()), name=proj_name, scans=scans,
+                    meshes=mesh_list, calibration=self._align_ref_dist,
+                    start_date=now if scans else None, end_date=None,
+                )
+            else:
+                self._campaign_data.name = proj_name
+                self._campaign_data.calibration = self._align_ref_dist
+                for i in range(min(count, len(self._campaign_data.scans))):
+                    s = self._panel.get_scan(i)
+                    if s:
+                        self._campaign_data.scans[i].name = s.name
+                self._campaign_data.meshes = mesh_list
+
+            save_project(path, self._campaign_data)
             self._project_path = path
             self._dirty        = False
             self.setWindowTitle(f"Refractory Analyzer — {proj_name}")
@@ -644,7 +1127,7 @@ class MainWindow(QMainWindow):
 
     def _open_project(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Abrir proyecto", "", PROJECT_FILTER
+            self, "Abrir campaña", "", PROJECT_FILTER
         )
         if path:
             self._open_project_path(path)
@@ -652,8 +1135,8 @@ class MainWindow(QMainWindow):
     def _open_project_path(self, path: str):
         if self._dirty and self._panel.count() > 0:
             r = QMessageBox.question(
-                self, "Abrir proyecto",
-                "Hay cambios sin guardar. ¿Descartarlos y abrir el proyecto?",
+                self, "Abrir campaña",
+                "Hay cambios sin guardar. ¿Descartarlos y abrir la campaña?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if r != QMessageBox.StandardButton.Yes:
@@ -668,29 +1151,32 @@ class MainWindow(QMainWindow):
 
         # Clear current state
         for i in range(self._panel.count() - 1, -1, -1):
-            self._panel.remove_campaign(i)
+            self._panel.remove_scan(i)
         self._mesh_cache.clear()
+        self._pristine_cache.clear()
 
         # Restore calibration
         if proj.calibration is not None:
             self._align_ref_dist = proj.calibration
-            self._lbl_ref_dist.setText(f"{proj.calibration:.6f}  ✓ calibrado")
+            self._lbl_ref_dist.setText(f"{self._fmt(proj.calibration)}  ✓ calibrado")
             self._save_calibration(proj.calibration)
 
-        # Restore campaigns
-        for i, (meta, mesh) in enumerate(zip(proj.campaigns, proj.meshes)):
-            self._panel.add_campaign(meta.name, meta.source_path)
-            self._mesh_cache[i] = mesh
+        # Restore scans
+        for i, (scan, mesh) in enumerate(zip(proj.scans, proj.meshes)):
+            self._panel.add_scan(scan.name, scan.source_path, load_date=scan.load_date)
+            self._mesh_cache[i]     = mesh
+            self._pristine_cache[i] = mesh
 
-        self._project_path = path
-        self._dirty        = False
+        self._campaign_data = proj
+        self._project_path  = path
+        self._dirty         = False
         self.setWindowTitle(f"Refractory Analyzer — {proj.name}")
         self._refresh_recent_menu()
 
         if proj.meshes:
             self._select_mesh(0)
             self._status_main.setText(
-                f"✓ Proyecto cargado: {len(proj.campaigns)} campaña(s)"
+                f"✓ Campaña cargada: {len(proj.scans)} escaneo(s)"
             )
 
     def closeEvent(self, event):

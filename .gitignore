@@ -32,6 +32,9 @@ pc_server/jobs/
 *.npz
 *.npy
 
+# PLY exportados durante sesiones de trabajo (artefactos, no código)
+samples/*.ply
+
 # Calibración local
 .refractory_calibration.json
 .refractory_mobile.json

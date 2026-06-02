@@ -2,8 +2,8 @@
 Project save/load.
 
 A .refproj file is a standard ZIP archive containing:
-  project.json          – metadata, campaign list, calibration
-  meshes/0.npz          – compressed numpy arrays for each campaign
+  project.json          – metadata, scan list, calibration
+  meshes/0.npz          – compressed numpy arrays for each scan
   meshes/1.npz
   ...
 
@@ -12,8 +12,14 @@ Mesh NPZ keys:
   faces     (M,3) uint32   (empty array for point clouds)
   normals   (N,3) float32
   colors    (N,4) float32
-  is_pc     scalar bool
-  source    scalar str (original file path, for display only)
+
+JSON format v2:
+  version, id, name, calibration, start_date, end_date,
+  scans[]: {id, name, source, mesh_idx, load_date}
+
+JSON format v1 (legacy, auto-migrated on load):
+  version, name, calibration,
+  campaigns[]: {name, source, mesh_idx}
 """
 
 import io
@@ -21,7 +27,9 @@ import json
 import pathlib
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime
 from typing import List, Optional
+from uuid import uuid4
 
 import numpy as np
 
@@ -33,44 +41,57 @@ _RECENT_FILE    = pathlib.Path.home() / ".refractory_recent.json"
 _MAX_RECENT     = 8
 
 
-# ── data class ───────────────────────────────────────────────────────────────
+# ── data classes ─────────────────────────────────────────────────────────────
 
 @dataclass
-class CampaignMeta:
+class ScanMeta:
+    id:          str
     name:        str
-    source_path: str          # original file, informative only
+    source_path: str                        # original file, informative only
+    load_date:   str                        # ISO 8601 datetime string
+    align_pts:   Optional[List] = None      # [[x,y,z],[x,y,z],[x,y,z]] or None
 
 
 @dataclass
-class ProjectData:
-    name:       str
-    campaigns:  List[CampaignMeta]
-    meshes:     List[MeshData]
-    calibration: Optional[float] = None   # ref P1-P2 distance
+class CampaignData:
+    id:          str
+    name:        str
+    scans:       List[ScanMeta]
+    meshes:      List[MeshData]
+    calibration:          Optional[float] = None   # ref P1-P2 distance
+    start_date:           Optional[str]   = None   # ISO 8601, auto from first scan
+    end_date:             Optional[str]   = None   # ISO 8601, set by user when closing
+    calibrated_scan_idx:  Optional[int]   = None   # index of the scan used as base
 
 
 # ── save ─────────────────────────────────────────────────────────────────────
 
-def save_project(path: str,
-                 campaign_names: List[str],
-                 mesh_data_list: List[MeshData],
-                 calibration: Optional[float] = None,
-                 project_name: str = ""):
-
+def save_project(path: str, campaign: CampaignData):
     meta = {
-        "version":     1,
-        "name":        project_name or pathlib.Path(path).stem,
-        "calibration": calibration,
-        "campaigns": [
-            {"name": n, "source": m.source_path, "mesh_idx": i}
-            for i, (n, m) in enumerate(zip(campaign_names, mesh_data_list))
+        "version":     2,
+        "id":          campaign.id,
+        "name":        campaign.name or pathlib.Path(path).stem,
+        "calibration": campaign.calibration,
+        "start_date":          campaign.start_date,
+        "end_date":            campaign.end_date,
+        "calibrated_scan_idx": campaign.calibrated_scan_idx,
+        "scans": [
+            {
+                "id":        s.id,
+                "name":      s.name,
+                "source":    s.source_path,
+                "mesh_idx":  i,
+                "load_date": s.load_date,
+                "align_pts": s.align_pts,
+            }
+            for i, s in enumerate(campaign.scans)
         ],
     }
 
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED,
                          compresslevel=6) as zf:
         zf.writestr("project.json", json.dumps(meta, indent=2))
-        for i, mesh in enumerate(mesh_data_list):
+        for i, mesh in enumerate(campaign.meshes):
             buf = io.BytesIO()
             np.savez_compressed(
                 buf,
@@ -87,14 +108,32 @@ def save_project(path: str,
 
 # ── load ─────────────────────────────────────────────────────────────────────
 
-def load_project(path: str) -> ProjectData:
-    campaigns: List[CampaignMeta] = []
-    meshes:    List[MeshData]     = []
+def load_project(path: str) -> CampaignData:
+    scans:  List[ScanMeta] = []
+    meshes: List[MeshData] = []
 
     with zipfile.ZipFile(path, "r") as zf:
         meta = json.loads(zf.read("project.json"))
 
-        for entry in meta["campaigns"]:
+        # Migrate v1 → v2
+        if meta.get("version", 1) == 1:
+            now = datetime.now().isoformat()
+            scans_raw = [
+                {
+                    "id":        str(uuid4()),
+                    "name":      c["name"],
+                    "source":    c.get("source", ""),
+                    "mesh_idx":  c["mesh_idx"],
+                    "load_date": now,
+                }
+                for c in meta.get("campaigns", [])
+            ]
+            meta["scans"]      = scans_raw
+            meta["id"]         = str(uuid4())
+            meta["start_date"] = scans_raw[0]["load_date"] if scans_raw else None
+            meta["end_date"]   = None
+
+        for entry in meta["scans"]:
             idx  = entry["mesh_idx"]
             raw  = zf.read(f"meshes/{idx}.npz")
             arrs = np.load(io.BytesIO(raw))
@@ -110,29 +149,36 @@ def load_project(path: str) -> ProjectData:
             radius   = float(np.max(np.linalg.norm(vertices - centroid, axis=1)))
 
             meshes.append(MeshData(
-                vertices     = vertices,
-                faces        = faces,
-                normals      = normals,
-                colors       = colors,
-                centroid     = centroid,
-                radius       = max(radius, 1e-6),
+                vertices       = vertices,
+                faces          = faces,
+                normals        = normals,
+                colors         = colors,
+                centroid       = centroid,
+                radius         = max(radius, 1e-6),
                 is_point_cloud = is_pc,
-                source_path  = entry.get("source", ""),
-                vertex_count = len(vertices),
-                face_count   = len(faces) if faces is not None else 0,
+                source_path    = entry.get("source", ""),
+                vertex_count   = len(vertices),
+                face_count     = len(faces) if faces is not None else 0,
             ))
-            campaigns.append(CampaignMeta(
+            scans.append(ScanMeta(
+                id          = entry.get("id", str(uuid4())),
                 name        = entry["name"],
                 source_path = entry.get("source", ""),
+                load_date   = entry.get("load_date", datetime.now().isoformat()),
+                align_pts   = entry.get("align_pts"),
             ))
 
     _add_recent(path)
 
-    return ProjectData(
+    return CampaignData(
+        id          = meta.get("id", str(uuid4())),
         name        = meta.get("name", pathlib.Path(path).stem),
-        campaigns   = campaigns,
+        scans       = scans,
         meshes      = meshes,
         calibration = meta.get("calibration"),
+        start_date           = meta.get("start_date"),
+        end_date             = meta.get("end_date"),
+        calibrated_scan_idx  = meta.get("calibrated_scan_idx"),
     )
 
 

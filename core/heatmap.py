@@ -7,8 +7,8 @@ COLORMAPS = ["plasma", "inferno", "RdYlGn_r", "hot", "viridis", "coolwarm"]
 def distances_to_colors(distances: np.ndarray,
                         colormap: str = "plasma",
                         clamp_max: float = None,
-                        clamp_pct: float = 95.0) -> np.ndarray:
-    """Return (N, 4) float32 RGBA array coloured by wear distances."""
+                        clamp_pct: float = 95.0):
+    """Return ((N, 4) float32 RGBA, vmax_used) coloured by wear distances."""
     vmax = clamp_max if (clamp_max is not None and clamp_max > 0) \
            else float(np.percentile(distances, clamp_pct))
     if vmax <= 0:
@@ -17,7 +17,7 @@ def distances_to_colors(distances: np.ndarray,
     norm   = np.clip(distances / vmax, 0.0, 1.0)
     cmap   = matplotlib.colormaps.get_cmap(colormap)
     colors = cmap(norm).astype(np.float32)
-    return colors
+    return colors, vmax
 
 
 def colorbar_image(colormap: str = "plasma",

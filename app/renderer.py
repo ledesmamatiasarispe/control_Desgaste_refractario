@@ -283,6 +283,7 @@ class Renderer:
         self._wireframe   = False
         self._clip_h      = _CLIP_PASS.copy()
         self._clip_v      = _CLIP_PASS.copy()
+        self._ref_mode    = "wireframe"      # "wireframe" | "solid_transparent"
 
     def initialize(self):
         self.mesh_prog  = _link(MESH_VERT, MESH_FRAG)
@@ -329,6 +330,9 @@ class Renderer:
     def set_wireframe(self, enabled: bool):
         self._wireframe = enabled
 
+    def set_ref_mode(self, mode: str):
+        self._ref_mode = mode
+
     def set_clip_planes(self, clip_h: np.ndarray, clip_v: np.ndarray):
         self._clip_h = clip_h.astype(np.float32)
         self._clip_v = clip_v.astype(np.float32)
@@ -357,15 +361,23 @@ class Renderer:
              use_vcolor: bool = False):
         GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
 
-        # ── reference mesh (wireframe, gray) ──
+        # ── reference mesh ──
         if self.mesh_obj_ref and self.mesh_obj_ref.vao:
-            GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_LINE)
             GL.glUseProgram(self.mesh_prog)
-            self._set_mesh_uniforms(mvp, cam_pos,
-                                    use_vcolor=False,
-                                    base_color=(0.55, 0.55, 0.60, 1.0))
-            self.mesh_obj_ref.draw()
-            GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
+            if self._ref_mode == "solid_transparent":
+                GL.glDepthMask(GL.GL_FALSE)
+                self._set_mesh_uniforms(mvp, cam_pos,
+                                        use_vcolor=False,
+                                        base_color=(0.2, 0.6, 1.0, 0.38))
+                self.mesh_obj_ref.draw()
+                GL.glDepthMask(GL.GL_TRUE)
+            else:
+                GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_LINE)
+                self._set_mesh_uniforms(mvp, cam_pos,
+                                        use_vcolor=False,
+                                        base_color=(0.55, 0.55, 0.60, 1.0))
+                self.mesh_obj_ref.draw()
+                GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
 
         # ── current mesh (solid / heatmap / wireframe) ──
         if self.mesh_obj and self.mesh_obj.vao:
