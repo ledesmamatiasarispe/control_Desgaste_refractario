@@ -61,3 +61,4 @@ desktop.ini
 
 # Kivy cache
 .kivy/
+refractory-capture-*.apk
