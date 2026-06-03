@@ -28,52 +28,76 @@ class ConnectFragment : Fragment() {
         .readTimeout(4, TimeUnit.SECONDS)
         .build()
 
-    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+    override fun onCreateView(
+        inflater: LayoutInflater, container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
         _binding = FragmentConnectBinding.inflate(inflater, container, false)
         return binding.root
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        // Restore last IP
-        val prefs = requireContext().getSharedPreferences("refractory", Context.MODE_PRIVATE)
-        binding.editIp.setText(prefs.getString("server_ip", ""))
+        super.onViewCreated(view, savedInstanceState)
 
-        binding.btnConnect.setOnClickListener { connect() }
+        // Cargar última IP guardada
+        val prefs = requireContext().getSharedPreferences("refractory_prefs", Context.MODE_PRIVATE)
+        val lastIp = prefs.getString("server_ip", "")
+        binding.editIp.setText(lastIp)
+
+        binding.btnConnect.setOnClickListener {
+            val ip = binding.editIp.text.toString().trim()
+            if (ip.isEmpty()) {
+                showError("Ingresá la IP del PC")
+            } else {
+                testConnection(ip)
+            }
+        }
     }
 
-    private fun connect() {
-        val ip = binding.editIp.text.toString().trim()
-        if (ip.isEmpty()) { showError("Ingresá la IP del PC"); return }
-
+    private fun testConnection(ip: String) {
         binding.btnConnect.isEnabled = false
         binding.progressBar.visibility = View.VISIBLE
         binding.tvStatus.text = "Conectando…"
 
         lifecycleScope.launch {
-            val ok = withContext(Dispatchers.IO) { ping(ip) }
+            val isOk = withContext(Dispatchers.IO) {
+                try {
+                    val url = "http://$ip:5005/ping"
+                    val request = Request.Builder().url(url).build()
+                    http.newCall(request).execute().use { response ->
+                        response.isSuccessful
+                    }
+                } catch (e: Exception) {
+                    false
+                }
+            }
+
             binding.btnConnect.isEnabled = true
             binding.progressBar.visibility = View.GONE
-            if (ok) {
-                requireContext().getSharedPreferences("refractory", Context.MODE_PRIVATE)
-                    .edit { putString("server_ip", ip) }
+
+            if (isOk) {
                 binding.tvStatus.text = "✓ Conectado"
-                findNavController().navigate(
-                    ConnectFragmentDirections.actionConnectToCapture(ip)
-                )
+                // Guardar IP exitosa
+                requireContext().getSharedPreferences("refractory_prefs", Context.MODE_PRIVATE).edit {
+                    putString("server_ip", ip)
+                }
+                
+                // Navegar a Selección de modo
+                val action = ConnectFragmentDirections.actionConnectToSelection(ip)
+                findNavController().navigate(action)
             } else {
-                binding.tvStatus.text = "No se encontró servidor en $ip:5005"
-                showError("No se pudo conectar")
+                binding.tvStatus.text = "No se pudo conectar a $ip:5005"
+                showError("Servidor no encontrado. Verificá la IP y el WiFi.")
             }
         }
     }
 
-    private fun ping(ip: String): Boolean = try {
-        val req = Request.Builder().url("http://$ip:5005/ping").build()
-        http.newCall(req).execute().use { it.isSuccessful }
-    } catch (e: Exception) { false }
+    private fun showError(message: String) {
+        Snackbar.make(binding.root, message, Snackbar.LENGTH_LONG).show()
+    }
 
-    private fun showError(msg: String) =
-        Snackbar.make(binding.root, msg, Snackbar.LENGTH_SHORT).show()
-
-    override fun onDestroyView() { super.onDestroyView(); _binding = null }
+    override fun onDestroyView() {
+        super.onDestroyView()
+        _binding = null
+    }
 }

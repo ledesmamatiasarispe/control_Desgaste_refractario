@@ -7,15 +7,24 @@
     <fragment android:id="@+id/connectFragment"
         android:name="com.refractoryanalyzer.ConnectFragment"
         android:label="Conectar">
-        <action android:id="@+id/action_connect_to_capture"
-            app:destination="@id/captureFragment"/>
+        <action android:id="@+id/action_connect_to_selection"
+            app:destination="@id/selectionFragment"/>
         <argument android:name="serverIp" app:argType="string" android:defaultValue=""/>
+    </fragment>
+
+    <fragment android:id="@+id/selectionFragment"
+        android:name="com.refractoryanalyzer.SelectionFragment"
+        android:label="Seleccionar Modo">
+        <argument android:name="serverIp" app:argType="string"/>
+        <action android:id="@+id/action_selection_to_capture"
+            app:destination="@id/captureFragment"/>
     </fragment>
 
     <fragment android:id="@+id/captureFragment"
         android:name="com.refractoryanalyzer.CaptureFragment"
         android:label="Capturar">
         <argument android:name="serverIp" app:argType="string"/>
+        <argument android:name="isAutomatic" app:argType="boolean" android:defaultValue="true"/>
         <action android:id="@+id/action_capture_to_progress"
             app:destination="@id/progressFragment"/>
     </fragment>
