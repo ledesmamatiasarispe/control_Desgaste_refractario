@@ -4,15 +4,15 @@ package.name = refractorycapture
 package.domain = com.refractoryanalyzer
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,json
-version = 1.0
+version = 1.0.3
 
-# Pillow para JPEG, requests para API GitHub + descarga APK
-requirements = python3,kivy==2.3.0,kivymd==1.1.1,requests,plyer,pillow
+# TEST MINIMO — solo kivy, sin kivymd/requests/plyer/pillow
+requirements = python3,kivy==2.3.0
 
 orientation = portrait
 
 # Android
-android.permissions = CAMERA, INTERNET, WRITE_EXTERNAL_STORAGE, READ_EXTERNAL_STORAGE, ACCESS_NETWORK_STATE, REQUEST_INSTALL_PACKAGES
+android.permissions = INTERNET
 android.minapi = 24
 android.targetapi = 33
 android.ndk = 25c
