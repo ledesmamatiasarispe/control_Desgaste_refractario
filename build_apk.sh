@@ -148,20 +148,8 @@ echo ""
 echo ">>> Aplicando parche a pythonpackage.py..."
 python3 /tmp/patch_p4a.py "$PYPACK"
 
-# También parchear Python a 3.10.10 si el recipe tiene 3.14.x
-for recipe in hostpython3 python3; do
-    f="$P4A/pythonforandroid/recipes/$recipe/__init__.py"
-    if [ -f "$f" ]; then
-        sed -i "s/version = '3\.[0-9]*\.[0-9]*'/version = '3.10.10'/" "$f" 2>/dev/null || true
-        sed -i 's/version = "3\.[0-9]*\.[0-9]*"/version = "3.10.10"/' "$f" 2>/dev/null || true
-        echo ">>> $recipe: $(grep 'version = ' $f | head -1)"
-    fi
-done
-
-# Limpiar builds de Python si la version cambio
-rm -rf "$BUILD/build/other_builds/hostpython3" \
-       "$BUILD/build/other_builds/python3" \
-       "$BUILD/dists"
+# Limpiar dists para forzar reempaquetado limpio con la version de Python correcta
+rm -rf "$BUILD/dists"
 
 echo ""
 echo ">>> Segunda pasada (compilación con parche aplicado)..."
