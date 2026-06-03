@@ -35,6 +35,23 @@ WORK_ROOT.mkdir(exist_ok=True)
 OUTPUT_DIR = pathlib.Path(r"D:\stl hornos\reconstructions")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# ── embedded-server hooks (set by desktop app when running embedded) ──────────
+_on_mesh_ready_cb = None   # callback(path: str, name: str) called on job done
+
+
+def set_mesh_ready_callback(cb):
+    """Register a callback to be called when a mesh is ready. Thread-safe."""
+    global _on_mesh_ready_cb
+    _on_mesh_ready_cb = cb
+
+
+def set_output_dir(path: str):
+    """Change where finished meshes are saved (call before jobs start)."""
+    global OUTPUT_DIR
+    OUTPUT_DIR = pathlib.Path(path)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    log.info(f"OUTPUT_DIR → {OUTPUT_DIR}")
+
 
 @dataclass
 class Job:
@@ -217,6 +234,15 @@ def _run_reconstruction(job: Job):
             job.output_path = str(dest)
 
         log.info(f"Job {job.job_id} done → {dest}")
+
+        # Notify desktop app if running embedded
+        if _on_mesh_ready_cb:
+            try:
+                from datetime import datetime
+                scan_name = f"Escaneo {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+                _on_mesh_ready_cb(str(dest), scan_name)
+            except Exception as cb_err:
+                log.warning(f"mesh_ready_cb error: {cb_err}")
 
     except Exception as e:
         with _lock:

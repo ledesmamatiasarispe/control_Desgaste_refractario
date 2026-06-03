@@ -85,6 +85,7 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_status()
         self._load_calibration()
+        self._start_embedded_server()
 
         from PySide6.QtCore import QTimer
         QTimer.singleShot(0, self._restore_last_project)
@@ -394,6 +395,9 @@ class MainWindow(QMainWindow):
         self._status_main = QLabel("Sin malla cargada")
         sb.addWidget(self._status_main, 1)
         self._gl.status_message.connect(self._status_main.setText)
+        self._server_lbl = QLabel("📡  iniciando…")
+        self._server_lbl.setToolTip("IP del servidor — ingresala en la app del celular")
+        sb.addPermanentWidget(self._server_lbl)
 
     # ── startup restore ──────────────────────────────────────────────────────
 
@@ -1120,6 +1124,8 @@ class MainWindow(QMainWindow):
             self._project_path = path
             self._dirty        = False
             self.setWindowTitle(f"Refractory Analyzer — {proj_name}")
+            if hasattr(self, '_flask_server'):
+                self._flask_server.set_output_dir(str(pathlib.Path(path).parent))
             self._status_main.setText(f"✓ Guardado: {path}")
             self._refresh_recent_menu()
         except Exception as e:
@@ -1203,6 +1209,63 @@ class MainWindow(QMainWindow):
         title = self.windowTitle()
         if not title.startswith("*"):
             self.setWindowTitle("* " + title)
+
+    # ── embedded Flask server ────────────────────────────────────────────────
+
+    def _start_embedded_server(self):
+        """Start the capture Flask server in a daemon thread."""
+        import sys, threading
+        pc_server_path = str(pathlib.Path(__file__).parent.parent / "pc_server")
+        if pc_server_path not in sys.path:
+            sys.path.insert(0, pc_server_path)
+
+        try:
+            import server as flask_server
+
+            # Output folder: project dir if open, else ~/refractory_scans
+            out = (str(pathlib.Path(self._project_path).parent)
+                   if self._project_path
+                   else str(pathlib.Path.home() / "refractory_scans"))
+            flask_server.set_output_dir(out)
+            flask_server.set_mesh_ready_callback(self._on_server_mesh_ready)
+
+            self._flask_server = flask_server
+            t = threading.Thread(
+                target=lambda: flask_server.app.run(
+                    host="0.0.0.0", port=5005,
+                    debug=False, use_reloader=False
+                ),
+                daemon=True,
+                name="flask-capture-server",
+            )
+            t.start()
+            self._server_thread = t
+            self._update_server_status()
+
+        except Exception as e:
+            self._server_lbl.setText(f"📡  error: {e}")
+
+    def _update_server_status(self):
+        import socket
+        try:
+            # Get the LAN IP (not loopback)
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            ip = "127.0.0.1"
+        self._server_lbl.setText(f"📡  {ip}:5005")
+
+    def _on_server_mesh_ready(self, path: str, name: str):
+        """Called from Flask thread when reconstruction finishes — dispatch to Qt thread."""
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: self._import_server_mesh(path, name))
+
+    def _import_server_mesh(self, path: str, name: str):
+        """Load and add a newly reconstructed mesh to the current project."""
+        self._status_main.setText(f"📥  Nuevo escaneo listo: {name} — cargando…")
+        self._on_load_requested(path, name)
 
     # ── public accessor for comparison dialog ────────────────────────────────
 
