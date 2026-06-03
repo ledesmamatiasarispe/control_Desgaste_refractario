@@ -28,6 +28,7 @@ app = Flask(__name__)
 
 # ── job storage ───────────────────────────────────────────────────────────────
 
+# Fotos e imágenes temporales de cada job — carpeta fija y visible para el usuario
 WORK_ROOT = pathlib.Path(tempfile.gettempdir()) / "refractory_capture"
 WORK_ROOT.mkdir(exist_ok=True)
 
@@ -222,10 +223,17 @@ def _run_reconstruction(job: Job):
 
         # Copy to output folder for the desktop app
         from datetime import datetime
+        import shutil
         ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
         dest = OUTPUT_DIR / f"scan_{ts}_{job.job_id}.obj"
-        import shutil
         shutil.copy2(obj_path, dest)
+
+        # Limpiar carpeta temporal del job (fotos, db, intermedios)
+        try:
+            shutil.rmtree(work_dir)
+            log.info(f"Job {job.job_id} temp dir cleaned")
+        except Exception as clean_err:
+            log.warning(f"Could not clean temp dir: {clean_err}")
 
         with _lock:
             job.status      = "done"
