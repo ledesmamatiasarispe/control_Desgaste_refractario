@@ -54,6 +54,14 @@ def set_output_dir(path: str):
     log.info(f"OUTPUT_DIR → {OUTPUT_DIR}")
 
 
+def set_work_root(path: str):
+    """Change where temp job folders (photos, SIFT db) are created."""
+    global WORK_ROOT
+    WORK_ROOT = pathlib.Path(path)
+    WORK_ROOT.mkdir(parents=True, exist_ok=True)
+    log.info(f"WORK_ROOT → {WORK_ROOT}")
+
+
 @dataclass
 class Job:
     job_id:          str

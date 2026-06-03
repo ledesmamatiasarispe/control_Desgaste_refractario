@@ -306,6 +306,12 @@ class MainWindow(QMainWindow):
         file_menu.addAction(act_close_camp)
 
         file_menu.addSeparator()
+        act_settings = QAction("⚙ Configuración…", self)
+        act_settings.setShortcut("Ctrl+,")
+        act_settings.triggered.connect(self._open_settings)
+        file_menu.addAction(act_settings)
+
+        file_menu.addSeparator()
         act_quit = QAction("Salir", self)
         act_quit.setShortcut("Ctrl+Q")
         act_quit.triggered.connect(self.close)
@@ -1210,6 +1216,18 @@ class MainWindow(QMainWindow):
         if not title.startswith("*"):
             self.setWindowTitle("* " + title)
 
+    # ── settings ─────────────────────────────────────────────────────────────
+
+    def _open_settings(self):
+        from ui.settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self)
+        if dlg.exec():
+            s = dlg.get_settings()
+            if hasattr(self, '_flask_server'):
+                self._flask_server.set_work_root(s["work_root"])
+                self._flask_server.set_output_dir(s["output_dir"])
+            self._status_main.setText("✓ Configuración guardada")
+
     # ── embedded Flask server ────────────────────────────────────────────────
 
     def _start_embedded_server(self):
@@ -1221,11 +1239,15 @@ class MainWindow(QMainWindow):
 
         try:
             import server as flask_server
+            from ui.settings_dialog import load_settings
+            s = load_settings()
 
-            # Output folder: project dir if open, else ~/refractory_scans
+            flask_server.set_work_root(s["work_root"])
+
+            # Output: project dir if open, else saved setting
             out = (str(pathlib.Path(self._project_path).parent)
                    if self._project_path
-                   else str(pathlib.Path.home() / "refractory_scans"))
+                   else s["output_dir"])
             flask_server.set_output_dir(out)
             flask_server.set_mesh_ready_callback(self._on_server_mesh_ready)
 
