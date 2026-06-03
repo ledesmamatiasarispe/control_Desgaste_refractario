@@ -90,15 +90,28 @@ def _reconstruct_colmap(
 
     # ── 2. Feature extraction ──
     cb(10, "Extrayendo características SIFT…")
+    extraction_opts = pycolmap.FeatureExtractionOptions()
+    extraction_opts.sift.max_num_features = 8192  # was 2048 — more features for low-texture
+    extraction_opts.max_image_size = 2400          # was 1600 — better quality, 2 threads is safe
+    extraction_opts.num_threads   = 2              # keep low to avoid OOM crash
+    # Pass only JPG filenames — the images/ folder also has .json metadata files
+    jpg_names = sorted([f.name for f in image_path.glob("*.jpg")])
     pycolmap.extract_features(
         db_path, image_path,
+        image_names=jpg_names,
         reader_options=reader_opts,
-        extraction_options=pycolmap.FeatureExtractionOptions(max_num_features=4096),
+        extraction_options=extraction_opts,
     )
 
-    # ── 3. Exhaustive matching ──
-    cb(25, "Buscando correspondencias entre fotogramas…")
-    pycolmap.match_exhaustive(db_path)
+    # ── 3. Sequential matching (better than exhaustive for cylindrical/symmetric objects) ──
+    # Exhaustive matching causes wrong correspondences in symmetric furnaces
+    # (frame 5 matches frame 45 pointing at the same side → wrong camera poses)
+    # Sequential matching only compares each frame with its N temporal neighbors
+    cb(25, "Buscando correspondencias secuenciales…")
+    seq_opts = pycolmap.SequentialPairingOptions()
+    seq_opts.overlap         = 20    # compare each frame with its 20 temporal neighbors
+    seq_opts.loop_detection  = False # vocab tree not available; disable loop closure
+    pycolmap.match_sequential(db_path, options=seq_opts)
 
     # ── 4. Sparse SfM ──
     cb(40, "Reconstruyendo estructura dispersa (SfM)…")
@@ -173,7 +186,7 @@ def _poisson_mesh(dense_path: pathlib.Path, out_path: pathlib.Path,
 
 
 def _mesh_from_sparse(recon, out_path: pathlib.Path, cb: Callable) -> str:
-    """Convert sparse point cloud → watertight mesh via trimesh alpha shape."""
+    """Convert sparse point cloud → surface mesh (alpha shape, better than convex hull)."""
     import trimesh
 
     cb(80, "Generando malla desde nube dispersa…")
@@ -182,13 +195,45 @@ def _mesh_from_sparse(recon, out_path: pathlib.Path, cb: Callable) -> str:
     if len(pts) < 10:
         raise RuntimeError("Muy pocos puntos en la nube dispersa.")
 
-    # Alpha shape gives a reasonable surface for furnace-like convex-ish shapes
-    pc   = trimesh.PointCloud(pts)
-    hull = pc.convex_hull
+    log.info(f"Sparse cloud: {len(pts)} points")
     obj_path = str(out_path / "mesh.obj")
 
+    # Try Open3D Ball-Pivoting (best quality for sparse clouds)
+    try:
+        import open3d as o3d
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
+        pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(
+            radius=0.05, max_nn=30))
+        # Adaptive radii based on point cloud density
+        dists = pcd.compute_nearest_neighbor_distance()
+        avg_d = float(np.mean(dists))
+        radii = [avg_d * r for r in (1.5, 3.0, 6.0)]
+        mesh_o3d = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+            pcd, o3d.utility.DoubleVector(radii))
+        if len(mesh_o3d.triangles) > 0:
+            cb(92, f"Exportando malla BPA ({len(mesh_o3d.triangles):,} caras)…")
+            o3d.io.write_triangle_mesh(obj_path, mesh_o3d)
+            return obj_path
+    except ImportError:
+        pass   # Open3D not installed — fall through to trimesh
+
+    # Fallback: Poisson reconstruction via trimesh (better than convex hull)
+    cb(85, "Reconstrucción Poisson desde nube dispersa…")
+    pc = trimesh.PointCloud(pts)
+    # Estimate normals pointing outward (assume centroid-centered furnace)
+    centroid = pts.mean(axis=0)
+    normals  = pts - centroid
+    norms    = np.linalg.norm(normals, axis=1, keepdims=True)
+    normals  = normals / (norms + 1e-8)
+
+    try:
+        mesh = trimesh.voxel.ops.points_to_marching_cubes(pts, pitch=0.02)
+    except Exception:
+        mesh = trimesh.PointCloud(pts).convex_hull   # last resort
+
     cb(92, "Exportando OBJ…")
-    hull.export(obj_path)
+    mesh.export(obj_path)
     return obj_path
 
 
