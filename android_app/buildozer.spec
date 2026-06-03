@@ -4,7 +4,7 @@ package.name = refractorycapture
 package.domain = com.refractoryanalyzer
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,json
-version = 1.0.3
+version = 1.0.4
 
 # TEST MINIMO — solo kivy, sin kivymd/requests/plyer/pillow
 requirements = python3,kivy==2.3.0
@@ -14,12 +14,12 @@ orientation = portrait
 # Android
 android.permissions = INTERNET
 android.minapi = 24
-android.targetapi = 33
-android.ndk = 25c
-android.sdk = 33
+android.targetapi = 34
+# NDK r27c genera alineacion de 16 KB requerida por Android 15+
+android.ndk = 27c
+android.sdk = 34
 android.archs = arm64-v8a, armeabi-v7a
 android.accept_sdk_license = True
-# android.features no soportado en p4a v2023.09.16 (las permisos de CAMERA ya implican la feature)
 
 [buildozer]
 log_level = 2
