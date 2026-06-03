@@ -14,10 +14,10 @@ orientation = portrait
 # Android
 android.permissions = INTERNET
 android.minapi = 24
-android.targetapi = 34
+android.targetapi = 35
 # NDK r27c genera alineacion de 16 KB requerida por Android 15+
 android.ndk = 27c
-android.sdk = 34
+android.sdk = 35
 android.archs = arm64-v8a, armeabi-v7a
 android.accept_sdk_license = True
 
