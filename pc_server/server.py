@@ -164,8 +164,9 @@ def start_reconstruct(job_id: str):
     if len(job.received_frames) < 5:
         return jsonify({"error": "se necesitan al menos 5 fotogramas"}), 400
 
-    # Build IMU summary file from per-frame JSONs
-    _build_imu_summary(job_id)
+    # Build IMU summary file + store alignment points from phone
+    align_pts = data.get("align_pts", [])
+    _build_imu_summary(job_id, align_pts=align_pts)
 
     # Start reconstruction in background thread
     with _lock:
@@ -268,8 +269,8 @@ def _run_reconstruction(job: Job):
         log.error(f"Job {job.job_id} failed: {e}", exc_info=True)
 
 
-def _build_imu_summary(job_id: str):
-    """Aggregate per-frame JSON metadata into a single IMU summary file."""
+def _build_imu_summary(job_id: str, align_pts: list = None):
+    """Aggregate per-frame JSON metadata + alignment points into imu_summary.json."""
     img_dir  = WORK_ROOT / job_id / "images"
     frames   = []
     width = height = 0
@@ -284,7 +285,12 @@ def _build_imu_summary(job_id: str):
         except Exception:
             pass
 
-    summary = {"frames": frames, "width": width, "height": height}
+    summary = {
+        "frames":     frames,
+        "width":      width,
+        "height":     height,
+        "align_pts":  align_pts or [],   # [{index, frame_id, px, py, imu}, ...]
+    }
     (WORK_ROOT / job_id / "imu_summary.json").write_text(json.dumps(summary))
 
 

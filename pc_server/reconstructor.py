@@ -137,6 +137,20 @@ def _reconstruct_colmap(
         cb(75, "MVS falló — generando malla desde nube dispersa…")
         obj_path = _mesh_from_sparse(best_recon, out_path, cb)
 
+    # ── 6. Back-project alignment points from phone ──
+    try:
+        align_pts = imu_data.get("align_pts", [])
+        if len(align_pts) >= 3:
+            cb(98, "Calculando puntos de alineación 3D…")
+            pts_3d = _backproject_align_points(best_recon, align_pts, obj_path)
+            if pts_3d:
+                import json
+                align_json = out_path / "align_pts.json"
+                align_json.write_text(json.dumps([p.tolist() for p in pts_3d]))
+                log.info(f"Align points saved: {align_json}")
+    except Exception as e:
+        log.warning(f"Could not compute align points: {e}")
+
     cb(100, "✓ Reconstrucción completada")
     return obj_path
 
@@ -293,3 +307,86 @@ def _ply_to_obj(ply_path: str, obj_path: str):
     import trimesh
     mesh = trimesh.load(ply_path, process=False)
     mesh.export(obj_path)
+
+
+# ── alignment point back-projection ──────────────────────────────────────────
+
+def _backproject_align_points(reconstruction, align_pts: list, mesh_obj_path: str):
+    """
+    For each alignment point {frame_id, px, py} from the phone:
+    - Find the COLMAP image with that frame name
+    - Get camera pose (R, t) and intrinsics
+    - Cast ray from camera center through pixel (px, py)
+    - Intersect ray with the reconstructed mesh
+    Returns list of 3 np.ndarray 3D points, or None if fewer than 3 found.
+    """
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+    import trimesh
+    from core.picking import ray_cast
+    from core.loader import MeshData
+
+    # Load reconstructed mesh for ray casting
+    try:
+        mesh = trimesh.load(mesh_obj_path, force='mesh', process=False)
+        if isinstance(mesh, trimesh.Scene):
+            mesh = trimesh.util.concatenate(list(mesh.geometry.values()))
+        verts  = np.array(mesh.vertices, dtype=np.float32)
+        faces  = np.array(mesh.faces,    dtype=np.uint32)
+    except Exception as e:
+        log.warning(f"Could not load mesh for backprojection: {e}")
+        return None
+
+    # Build minimal MeshData for ray_cast
+    centroid = verts.mean(axis=0)
+    radius   = float(np.max(np.linalg.norm(verts - centroid, axis=1)))
+    mesh_data = MeshData(
+        vertices=verts, faces=faces,
+        normals=np.zeros_like(verts), colors=np.zeros((len(verts),4), np.float32),
+        centroid=centroid, radius=radius,
+        is_point_cloud=False, source_path=mesh_obj_path,
+        vertex_count=len(verts), face_count=len(faces)
+    )
+
+    # Build lookup: frame name → COLMAP image
+    name_to_img = {img.name: img for img in reconstruction.images.values()}
+
+    pts_3d = []
+    for ap in sorted(align_pts, key=lambda x: x.get("index", 0)):
+        frame_id = ap.get("frame_id")
+        px = ap.get("px", 0)
+        py = ap.get("py", 0)
+        frame_name = f"{frame_id:05d}.jpg"
+
+        img = name_to_img.get(frame_name)
+        if img is None:
+            log.warning(f"Align point frame {frame_name} not in reconstruction")
+            continue
+
+        cam = reconstruction.cameras[img.camera_id]
+        # Get intrinsics (SIMPLE_RADIAL: [f, cx, cy, k])
+        params = cam.params
+        f  = float(params[0])
+        cx = float(params[1]) if len(params) > 1 else cam.width  / 2.0
+        cy = float(params[2]) if len(params) > 2 else cam.height / 2.0
+
+        # Direction in camera space (normalized)
+        d_cam = np.array([(px - cx) / f, (py - cy) / f, 1.0], dtype=np.float64)
+        d_cam /= np.linalg.norm(d_cam)
+
+        # Camera pose: cam_from_world → world_from_cam
+        R = np.array(img.cam_from_world.rotation.matrix(), dtype=np.float64)
+        t = np.array(img.cam_from_world.translation, dtype=np.float64)
+        R_inv   = R.T
+        origin  = (-R_inv @ t).astype(np.float32)
+        direction = (R_inv @ d_cam).astype(np.float32)
+        direction /= np.linalg.norm(direction)
+
+        result = ray_cast(origin, direction, mesh_data)
+        if result is not None:
+            pts_3d.append(result.hit_point)
+            log.info(f"Align pt {ap.get('index')}: {result.hit_point}")
+        else:
+            log.warning(f"No mesh intersection for align pt {ap.get('index')}")
+
+    return pts_3d if len(pts_3d) >= 3 else None

@@ -1289,6 +1289,33 @@ class MainWindow(QMainWindow):
         self._status_main.setText(f"📥  Nuevo escaneo listo: {name} — cargando…")
         self._on_load_requested(path, name)
 
+        # Check if alignment points from the phone are available
+        import json
+        align_file = pathlib.Path(path).parent / "align_pts.json"
+        if align_file.exists():
+            try:
+                pts_raw = json.loads(align_file.read_text())
+                pts = [np.array(p, dtype=np.float32) for p in pts_raw]
+                if len(pts) >= 3 and self._align_ref_dist is not None:
+                    QTimer.singleShot(800, lambda: self._offer_auto_align(pts, name))
+            except Exception:
+                pass
+
+    def _offer_auto_align(self, pts: list, name: str):
+        """Offer to auto-align the just-imported mesh using phone alignment points."""
+        from PySide6.QtCore import QTimer
+        r = QMessageBox.question(
+            self, "Puntos de alineación detectados",
+            f"El escaneo '{name}' incluye 3 puntos de referencia capturados con el celular.\n\n"
+            "¿Aplicar alineación automática?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if r == QMessageBox.StandardButton.Yes:
+            idx = self._panel.count() - 1   # just-added scan
+            data = self._mesh_cache.get(idx)
+            if data is not None:
+                self._on_align_ready(pts)   # reuse existing alignment flow
+
     # ── public accessor for comparison dialog ────────────────────────────────
 
     def get_mesh_data(self, index: int) -> Optional[MeshData]:
