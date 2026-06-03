@@ -109,9 +109,9 @@ def _reconstruct_colmap(
     # Sequential matching only compares each frame with its N temporal neighbors
     cb(25, "Buscando correspondencias secuenciales…")
     seq_opts = pycolmap.SequentialPairingOptions()
-    seq_opts.overlap         = 20    # compare each frame with its 20 temporal neighbors
-    seq_opts.loop_detection  = False # vocab tree not available; disable loop closure
-    pycolmap.match_sequential(db_path, options=seq_opts)
+    seq_opts.overlap        = 20    # compare each frame with its 20 temporal neighbors
+    seq_opts.loop_detection = False # vocab tree not available; disable loop closure
+    pycolmap.match_sequential(db_path, pairing_options=seq_opts)
 
     # ── 4. Sparse SfM ──
     cb(40, "Reconstruyendo estructura dispersa (SfM)…")
