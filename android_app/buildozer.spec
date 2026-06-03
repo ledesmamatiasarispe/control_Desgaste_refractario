@@ -19,8 +19,12 @@ android.ndk = 25c
 android.sdk = 33
 android.archs = arm64-v8a, armeabi-v7a
 android.accept_sdk_license = True
-android.features = android.hardware.camera, android.hardware.camera.autofocus
+# android.features no soportado en p4a v2023.09.16 (las permisos de CAMERA ya implican la feature)
 
 [buildozer]
 log_level = 2
 warn_on_root = 1
+
+# Pinnar p4a a versión estable 2023 que usa recipes propias (no wheels)
+p4a.fork = kivy
+p4a.branch = v2023.09.16
