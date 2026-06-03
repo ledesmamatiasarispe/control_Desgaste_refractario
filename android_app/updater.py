@@ -27,7 +27,21 @@ from version import GITHUB_REPO, GITHUB_BRANCH, VERSION
 
 log = logging.getLogger(__name__)
 
-_API_LATEST  = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+_API_LATEST   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+_APPLIED_FILE = pathlib.Path(os.environ.get("TMPDIR", "/tmp")) / ".refractory_applied_version"
+
+
+def inject_update_path():
+    """No-op: this app installs updates via system installer, no hot-patching."""
+    pass
+
+
+def get_applied_version() -> Optional[str]:
+    """Return version string if an update was applied this session, else None."""
+    try:
+        return _APPLIED_FILE.read_text().strip() or None
+    except Exception:
+        return None
 _TIMEOUT_API = 10   # seconds
 _TIMEOUT_DL  = 120  # seconds for APK download
 
