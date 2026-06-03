@@ -5,24 +5,81 @@ Build APK: buildozer android debug
 """
 
 import os
+import sys
+import traceback
+
 os.environ.setdefault("KIVY_NO_ENV_CONFIG", "1")
 
 # ── MUST be first: inject update path before any app module is imported ──────
-import updater
-updater.inject_update_path()
+try:
+    import updater
+    updater.inject_update_path()
+except Exception:
+    pass
 # ─────────────────────────────────────────────────────────────────────────────
 
-from kivy.clock import Clock
-from kivy.uix.screenmanager import ScreenManager, SlideTransition
-from kivymd.app import MDApp
-from kivymd.uix.dialog import MDDialog
-from kivymd.uix.button import MDFlatButton, MDRaisedButton
+try:
+    from kivy.clock import Clock
+    from kivy.uix.screenmanager import ScreenManager, SlideTransition
+    from kivy.uix.label import Label
+    from kivy.uix.boxlayout import BoxLayout
+    from kivy.uix.scrollview import ScrollView
+    from kivymd.app import MDApp
+    from kivymd.uix.dialog import MDDialog
+    from kivymd.uix.button import MDFlatButton, MDRaisedButton
 
-from screens.connect  import ConnectScreen
-from screens.capture  import CaptureScreen
-from screens.progress import ProgressScreen
-from version import VERSION
+    from screens.connect  import ConnectScreen
+    from screens.capture  import CaptureScreen
+    from screens.progress import ProgressScreen
+    from version import VERSION
+    _IMPORT_ERROR = None
+except Exception as e:
+    _IMPORT_ERROR = traceback.format_exc()
+    # Minimal fallback so Kivy can at least show the error
+    try:
+        from kivy.app import App
+        from kivy.uix.label import Label
+        from kivy.uix.scrollview import ScrollView
+        from kivy.uix.boxlayout import BoxLayout
+    except Exception:
+        pass
 
+
+# ── Fallback app shown when imports fail ─────────────────────────────────────
+
+class _ErrorApp:
+    """Minimal Kivy App that shows the crash traceback on screen."""
+    def run(self):
+        try:
+            from kivy.app import App
+            from kivy.uix.label import Label
+            from kivy.uix.scrollview import ScrollView
+
+            class CrashApp(App):
+                def build(self):
+                    lbl = Label(
+                        text=f"[b]ERROR AL INICIAR[/b]\n\n{_IMPORT_ERROR}",
+                        markup=True,
+                        font_size="12sp",
+                        size_hint_y=None,
+                        valign="top",
+                    )
+                    lbl.bind(texture_size=lambda inst, val: setattr(inst, "height", val[1]))
+                    sv = ScrollView()
+                    sv.add_widget(lbl)
+                    return sv
+
+            CrashApp().run()
+        except Exception as e:
+            # Absolute last resort: write to a log file
+            try:
+                with open("/sdcard/refractory_crash.txt", "w") as f:
+                    f.write(_IMPORT_ERROR or str(e))
+            except Exception:
+                pass
+
+
+# ── Main app ──────────────────────────────────────────────────────────────────
 
 class RefractoryApp(MDApp):
     title = "Refractory Capture"
@@ -38,21 +95,17 @@ class RefractoryApp(MDApp):
         return sm
 
     def on_start(self):
-        # Show current version in window title (desktop) or quietly log
         applied = updater.get_applied_version()
         running = applied or VERSION
         self.title = f"Refractory Capture  v{running}"
-
-        # Check for updates silently in background
         updater.check_in_background(self._on_update_found)
 
     # ── update handling ───────────────────────────────────────────────────────
 
-    def _on_update_found(self, info: updater.UpdateInfo):
-        """Called from background thread when a newer version is available."""
+    def _on_update_found(self, info):
         Clock.schedule_once(lambda _: self._show_update_dialog(info), 0)
 
-    def _show_update_dialog(self, info: updater.UpdateInfo):
+    def _show_update_dialog(self, info):
         self._update_info = info
         notes = info.release_notes[:200] + "…" if len(info.release_notes) > 200 \
                 else info.release_notes
@@ -83,7 +136,6 @@ class RefractoryApp(MDApp):
             text="Conectando con GitHub…",
         )
         self._progress_dialog.open()
-
         import threading
         threading.Thread(
             target=updater.download_and_install,
@@ -92,11 +144,18 @@ class RefractoryApp(MDApp):
             daemon=True,
         ).start()
 
-    def _update_cb(self, pct: int, msg: str):
+    def _update_cb(self, pct, msg):
         Clock.schedule_once(
             lambda _, m=msg: setattr(self._progress_dialog, "text", m), 0
         )
 
 
 if __name__ == "__main__":
-    RefractoryApp().run()
+    if _IMPORT_ERROR:
+        _ErrorApp().run()
+    else:
+        try:
+            RefractoryApp().run()
+        except Exception:
+            _IMPORT_ERROR = traceback.format_exc()
+            _ErrorApp().run()

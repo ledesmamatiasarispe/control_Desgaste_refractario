@@ -1,4 +1,4 @@
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 # GitHub repo where updates are pulled from.
 # Format: "owner/repo"
