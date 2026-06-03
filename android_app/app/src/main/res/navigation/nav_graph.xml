@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<navigation xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/nav_graph"
+    app:startDestination="@id/connectFragment">
+
+    <fragment android:id="@+id/connectFragment"
+        android:name="com.refractoryanalyzer.ConnectFragment"
+        android:label="Conectar">
+        <action android:id="@+id/action_connect_to_capture"
+            app:destination="@id/captureFragment"/>
+        <argument android:name="serverIp" app:argType="string" android:defaultValue=""/>
+    </fragment>
+
+    <fragment android:id="@+id/captureFragment"
+        android:name="com.refractoryanalyzer.CaptureFragment"
+        android:label="Capturar">
+        <argument android:name="serverIp" app:argType="string"/>
+        <action android:id="@+id/action_capture_to_progress"
+            app:destination="@id/progressFragment"/>
+    </fragment>
+
+    <fragment android:id="@+id/progressFragment"
+        android:name="com.refractoryanalyzer.ProgressFragment"
+        android:label="Procesando">
+        <argument android:name="serverIp"    app:argType="string"/>
+        <argument android:name="frameCount"  app:argType="integer" android:defaultValue="0"/>
+        <argument android:name="framesCache" app:argType="integer[]"/>
+    </fragment>
+
+</navigation>

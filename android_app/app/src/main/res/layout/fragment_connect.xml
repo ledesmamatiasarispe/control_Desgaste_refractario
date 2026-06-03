@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:padding="24dp" android:gravity="center">
+
+    <TextView android:text="Refractory Capture"
+        android:textSize="24sp" android:textStyle="bold"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_marginBottom="8dp"/>
+
+    <TextView android:text="Conectate al servidor del PC"
+        android:textSize="14sp"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_marginBottom="32dp"/>
+
+    <com.google.android.material.textfield.TextInputLayout
+        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:hint="IP del PC  (ej: 192.168.1.100)">
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/edit_ip"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:inputType="textNoSuggestions"
+            android:imeOptions="actionDone"/>
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <TextView android:id="@+id/tv_status"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_marginTop="12dp" android:textSize="13sp" android:text=""/>
+
+    <ProgressBar android:id="@+id/progress_bar" style="?android:progressBarStyleHorizontal"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:indeterminate="true" android:visibility="gone"
+        android:layout_marginTop="8dp"/>
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn_connect"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginTop="20dp" android:text="CONECTAR"/>
+
+</LinearLayout>

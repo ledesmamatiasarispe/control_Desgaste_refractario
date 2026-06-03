@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Internal cache directory — where we download the APK -->
-    <cache-path name="cache" path="." />
-    <!-- External storage fallback -->
-    <external-path name="external" path="." />
-</paths>
