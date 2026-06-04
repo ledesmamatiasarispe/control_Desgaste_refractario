@@ -299,9 +299,17 @@ class PointCloudRenderer : GLSurfaceView.Renderer {
             rgb[i * 3 + 2] = data[i * 6 + 5]
         }
 
-        // Si todos los colores son cero (pycolmap no los populó), usar gradiente por altura
+        // Si todos los colores son cero o verde COLMAP por defecto, usar gradiente por altura
         val allBlack = rgb.none { it > 0.01f }
-        if (allBlack) {
+        val allGreen = !allBlack && run {
+            var greenDefault = 0; var total = 0
+            for (i in 0 until pointCount) {
+                total++
+                if (rgb[i*3] < 0.05f && rgb[i*3+1] > 0.9f && rgb[i*3+2] < 0.05f) greenDefault++
+            }
+            total > 0 && greenDefault.toFloat() / total > 0.5f
+        }
+        if (allBlack || allGreen) {
             val minY = xyz.filterIndexed { i, _ -> i % 3 == 1 }.minOrNull() ?: 0f
             val maxY = xyz.filterIndexed { i, _ -> i % 3 == 1 }.maxOrNull() ?: 1f
             val rangeY = (maxY - minY).coerceAtLeast(0.001f)

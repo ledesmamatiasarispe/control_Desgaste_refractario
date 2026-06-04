@@ -120,7 +120,14 @@ def reconstruct_sparse(
     best_recon.write(str(sparse_path / "0"))
     log.info(f"SfM preview: {len(best_recon.images)} images, {len(best_recon.points3D)} pts")
 
-    progress_cb(80, "Exportando nube de puntos…")
+    progress_cb(75, "Extrayendo colores de las imágenes…")
+    try:
+        best_recon.extract_colors_for_all_images(str(img_path))
+        log.info("Colors extracted OK")
+    except Exception as e:
+        log.warning(f"Color extraction failed: {e}")
+
+    progress_cb(85, "Exportando nube de puntos…")
     ply_path = str(out_path / "sparse.ply")
     _export_sparse_ply(best_recon, ply_path)
 
@@ -251,6 +258,10 @@ def _reconstruct_colmap(
 
     # Use the reconstruction with most registered images
     best_recon = max(maps.values(), key=lambda r: len(r.images))
+    try:
+        best_recon.extract_colors_for_all_images(str(image_path))
+    except Exception as e:
+        log.warning(f"Color extraction failed: {e}")
     best_recon.write(str(sparse_path / "0"))
     log.info(f"SfM: {len(best_recon.images)} images, "
              f"{len(best_recon.points3D)} points")
