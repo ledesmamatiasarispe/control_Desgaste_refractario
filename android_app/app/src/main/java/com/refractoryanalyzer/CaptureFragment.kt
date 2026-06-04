@@ -282,15 +282,41 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
     }
 
     private fun yuvToJpeg(image: android.media.Image): ByteArray {
-        val yBuffer = image.planes[0].buffer
-        val uBuffer = image.planes[1].buffer
-        val vBuffer = image.planes[2].buffer
-        val nv21 = ByteArray(yBuffer.remaining() + uBuffer.remaining() + vBuffer.remaining())
-        yBuffer.get(nv21, 0, yBuffer.remaining())
-        vBuffer.get(nv21, yBuffer.remaining(), vBuffer.remaining())
-        uBuffer.get(nv21, yBuffer.remaining() + vBuffer.remaining(), uBuffer.remaining())
+        val w = image.width
+        val h = image.height
+
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+
+        val nv21 = ByteArray(w * h * 3 / 2)
+
+        // Y — respetar rowStride
+        val yBuf = yPlane.buffer
+        val yStride = yPlane.rowStride
+        for (row in 0 until h) {
+            yBuf.position(row * yStride)
+            yBuf.get(nv21, row * w, w)
+        }
+
+        // VU intercalado (NV21: V primero, luego U)
+        val vBuf = vPlane.buffer
+        val uBuf = uPlane.buffer
+        val vStride = vPlane.rowStride
+        val uStride = uPlane.rowStride
+        val vPixel = vPlane.pixelStride
+        val uPixel = uPlane.pixelStride
+        var idx = w * h
+        for (row in 0 until h / 2) {
+            for (col in 0 until w / 2) {
+                nv21[idx++] = vBuf.get(row * vStride + col * vPixel)
+                nv21[idx++] = uBuf.get(row * uStride + col * uPixel)
+            }
+        }
+
         val out = ByteArrayOutputStream()
-        YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null).compressToJpeg(Rect(0, 0, image.width, image.height), 90, out)
+        YuvImage(nv21, ImageFormat.NV21, w, h, null)
+            .compressToJpeg(Rect(0, 0, w, h), 90, out)
         return out.toByteArray()
     }
 
