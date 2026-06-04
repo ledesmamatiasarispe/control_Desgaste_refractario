@@ -25,16 +25,29 @@ import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import androidx.navigation.fragment.findNavController
 import androidx.navigation.fragment.navArgs
-import com.google.ar.core.*
-import com.google.ar.core.exceptions.*
+import androidx.core.content.edit
+import com.google.ar.core.Anchor
+import com.google.ar.core.ArCoreApk
+import com.google.ar.core.CameraConfig
+import com.google.ar.core.CameraConfigFilter
+import com.google.ar.core.Config
+import com.google.ar.core.Coordinates2d
+import com.google.ar.core.Frame
+import com.google.ar.core.Pose
+import com.google.ar.core.Session
+import com.google.ar.core.TrackingState
 import com.refractoryanalyzer.databinding.FragmentCaptureBinding
 import kotlinx.coroutines.*
+import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.util.EnumSet
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import javax.microedition.khronos.egl.EGLConfig
@@ -52,6 +65,9 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var coverageOverlay: CoverageOverlayView
 
+    private var surfaceWidth = 0
+    private var surfaceHeight = 0
+
     private var arSession: Session? = null
     private var installRequested = false
     private var lastArPose: Pose? = null
@@ -59,8 +75,14 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
     private var isCapturing = false
     private var isTakingPhoto = false
     private var captureJob: Job? = null
+    
+    private var isPhotoPending = false
+    private var photoCallback: ((Int) -> Unit)? = null
+    private var latestFrame: Frame? = null
 
     private val alignPoints = mutableListOf<AlignPoint>()
+    private val alignAnchors = mutableMapOf<Int, Anchor>()
+    private val cylinderAnchors = mutableListOf<Anchor>()
     private var lastRotationMatrix = FloatArray(9).apply { this[0]=1f; this[4]=1f; this[8]=1f }
 
     companion object {
@@ -75,13 +97,36 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
     private var gyroMag = 0f
 
     private val capturedFrames = mutableListOf<CapturedFrame>()
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
+    private var uploadLoopJob: Job? = null
 
     data class CapturedFrame(
         val frameId: Int,
         var jpegBytes: ByteArray?,
         val imu: JSONObject,
         val camera: JSONObject
-    )
+    ) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (javaClass != other?.javaClass) return false
+            other as CapturedFrame
+            if (frameId != other.frameId) return false
+            if (jpegBytes != null) {
+                if (other.jpegBytes == null) return false
+                if (!jpegBytes.contentEquals(other.jpegBytes)) return false
+            } else if (other.jpegBytes != null) return false
+            return true
+        }
+
+        override fun hashCode(): Int {
+            var result = frameId
+            result = 31 * result + (jpegBytes?.contentHashCode() ?: 0)
+            return result
+        }
+    }
 
     data class AlignPoint(
         val index: Int,
@@ -99,10 +144,12 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
     ) { isGranted ->
         if (isGranted) setupArSession()
         else {
-            Toast.makeText(context, "Permiso de cámara requerido", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, R.string.permiso_camara_requerido, Toast.LENGTH_SHORT).show()
             findNavController().popBackStack()
         }
     }
+
+    private var currentAlignIndex = 0
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         _binding = FragmentCaptureBinding.inflate(inflater, container, false)
@@ -123,16 +170,23 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
         checkPermissions()
 
         binding.btnCapture.setOnClickListener { if (args.isAutomatic) toggleCapture() else takePhoto() }
-        binding.btnSend.setOnClickListener { sendData() }
+        binding.btnSend.setOnClickListener { viewPointCloud() }
         binding.btnBack.setOnClickListener { findNavController().popBackStack() }
-        binding.btnCyl1.setOnClickListener { markCylinderPoint() }
-        binding.btnCyl2.setOnClickListener { markCylinderPoint() }
-        binding.btnCyl3.setOnClickListener { markCylinderPoint() }
-        binding.btnAl1.setOnClickListener { markAlignPoint(0) }
-        binding.btnAl2.setOnClickListener { markAlignPoint(1) }
-        binding.btnAl3.setOnClickListener { markAlignPoint(2) }
+
+        // Resume upload loop if returning from point cloud viewer
+        if (FrameStore.currentJobId.isNotEmpty() && FrameStore.serverIp == args.serverIp) {
+            capturedFrames.clear()
+            startUploadLoop()
+        } else {
+            FrameStore.reset()
+            FrameStore.serverIp = args.serverIp
+            ensureJobCreated()
+        }
+        binding.btnCyl.setOnClickListener { markCylinderPoint() }
+        binding.btnAlign.setOnClickListener { markAlignPoint() }
 
         updateUI()
+        updateAlignButtonText()
     }
 
     private fun checkPermissions() {
@@ -146,19 +200,29 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
     private fun setupArSession() {
         if (arSession != null) return
         try {
-            arSession = Session(requireContext())
-            val config = Config(arSession)
+            val session = Session(requireContext())
+            arSession = session
+
+            // Limitar la cámara a 30fps para ahorrar batería y reducir calor
+            val filter = CameraConfigFilter(session)
+            filter.targetFps = EnumSet.of(CameraConfig.TargetFps.TARGET_FPS_30)
+            val cameraConfigs = session.getSupportedCameraConfigs(filter)
+            if (cameraConfigs.isNotEmpty()) {
+                session.cameraConfig = cameraConfigs[0]
+            }
+
+            val config = Config(session)
             config.focusMode = Config.FocusMode.AUTO
             config.updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
-            arSession?.configure(config)
-        } catch (e: Exception) { Log.e("CaptureFragment", "ARCore session failed", e) }
+            session.configure(config)
+        } catch (_: Exception) { Log.e("CaptureFragment", "ARCore session failed") }
     }
 
     private fun toggleCapture() { if (isCapturing) stopAutoCapture() else startAutoCapture() }
 
     private fun startAutoCapture() {
         isCapturing = true
-        binding.btnCapture.text = "■ DETENER"
+        binding.btnCapture.text = getString(R.string.btn_detener)
         captureJob = viewLifecycleOwner.lifecycleScope.launch {
             while (isCapturing && capturedFrames.size < TARGET_FRAMES) {
                 if (gyroMag < GYRO_MAX) {
@@ -175,31 +239,27 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
         isCapturing = false
         captureJob?.cancel()
         captureJob = null
-        binding.btnCapture.text = "● INICIAR"
+        binding.btnCapture.text = getString(R.string.btn_iniciar)
     }
 
     private fun takePhoto(onCaptured: ((Int) -> Unit)? = null) {
-        if (isTakingPhoto) return
-        val session = arSession ?: return
-        isTakingPhoto = true
-        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.Default) {
-            try {
-                var frame: Frame? = null
-                repeat(10) { if (frame?.camera?.trackingState != TrackingState.TRACKING) { frame = session.update(); if (frame?.camera?.trackingState != TrackingState.TRACKING) delay(50) } }
-                val image = frame?.acquireCameraImage() ?: throw Exception("No image")
-                val bytes = yuvToJpeg(image)
-                val width = image.width
-                val height = image.height
-                image.close()
-                withContext(Dispatchers.Main) {
-                    isTakingPhoto = false
-                    val frameId = capturedFrames.size
-                    capturedFrames.add(CapturedFrame(frameId, bytes, buildImuJson(), buildCameraJson(width, height)))
-                    coverageOverlay.markCaptured(lastOrient[0], lastOrient[1])
-                    updateUI()
-                    onCaptured?.invoke(frameId)
-                }
-            } catch (e: Exception) { isTakingPhoto = false; Log.e("CaptureFragment", "Photo failed", e) }
+        if (isTakingPhoto || isPhotoPending) return
+        photoCallback = onCaptured
+        isPhotoPending = true
+    }
+
+    private fun processPhoto(image: android.media.Image, frameId: Int, onCaptured: ((Int) -> Unit)?) {
+        val bytes = yuvToJpeg(image)
+        val width = image.width
+        val height = image.height
+        image.close()
+
+        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.Main) {
+            capturedFrames.add(CapturedFrame(frameId, bytes, buildImuJson(), buildCameraJson(width, height)))
+            coverageOverlay.markCaptured(lastOrient[0], lastOrient[1])
+            updateUI()
+            isTakingPhoto = false
+            onCaptured?.invoke(frameId)
         }
     }
 
@@ -217,19 +277,80 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
     }
 
     private fun markCylinderPoint() {
-        val pose = lastArPose ?: return
-        coverageOverlay.addCylinderWorldPoint(pose.tx(), pose.ty(), pose.tz())
+        val session = arSession ?: return
+        val pose = lastArPose?.compose(Pose.makeTranslation(0f, 0f, -0.01f)) ?: return
+        
+        try {
+            val anchor = session.createAnchor(pose)
+            cylinderAnchors.add(anchor)
+            if (cylinderAnchors.size > 3) cylinderAnchors.removeAt(0)
+            
+            // Actualizar los puntos en el overlay
+            val pts = cylinderAnchors.map { it.pose }
+            coverageOverlay.resetCylinderPoints()
+            pts.forEach { coverageOverlay.addCylinderWorldPoint(it.tx(), it.ty(), it.tz()) }
+        } catch (_: Exception) {
+            Log.e("CaptureFragment", "Failed to create cylinder anchor")
+        }
     }
 
-    private fun markAlignPoint(index: Int) {
+    private fun markAlignPoint() {
+        val session = arSession ?: return
         takePhoto { frameId ->
-            val pose = lastArPose ?: return@takePhoto
-            val pt = AlignPoint(index = index, frameId = frameId, worldX = pose.tx(), worldY = pose.ty(), worldZ = pose.tz(), imuAccel = lastAccel.toList(), imuGyro = lastGyro.toList(), imuOrient = lastOrient.toList())
-            alignPoints.removeAll { it.index == index }
-            alignPoints.add(pt)
-            saveAlignPointsToPrefs()
-            coverageOverlay.addAlignPoint(pt)
+            val pose = lastArPose?.compose(Pose.makeTranslation(0f, 0f, -0.01f)) ?: return@takePhoto
+            
+            try {
+                val anchor = session.createAnchor(pose)
+                alignAnchors[currentAlignIndex] = anchor
+                
+                val pt = AlignPoint(
+                    index = currentAlignIndex,
+                    frameId = frameId,
+                    worldX = pose.tx(),
+                    worldY = pose.ty(),
+                    worldZ = pose.tz(),
+                    imuAccel = lastAccel.toList(),
+                    imuGyro = lastGyro.toList(),
+                    imuOrient = lastOrient.toList()
+                )
+                alignPoints.removeAll { it.index == currentAlignIndex }
+                alignPoints.add(pt)
+                saveAlignPointsToPrefs()
+                
+                updateOverlayPoints()
+                
+                currentAlignIndex = (currentAlignIndex + 1) % 3
+                updateAlignButtonText()
+            } catch (_: Exception) {
+                Log.e("CaptureFragment", "Failed to create alignment anchor")
+            }
         }
+    }
+
+    private fun updateOverlayPoints() {
+        val updatedPoints = alignPoints.map { pt ->
+            val anchor = alignAnchors[pt.index]
+            if (anchor != null && anchor.trackingState == TrackingState.TRACKING) {
+                val p = anchor.pose
+                pt.copy(worldX = p.tx(), worldY = p.ty(), worldZ = p.tz())
+            } else pt
+        }
+        coverageOverlay.setAlignPoints(updatedPoints)
+        
+        if (cylinderAnchors.size == 3) {
+            coverageOverlay.resetCylinderPoints()
+            cylinderAnchors.forEach { anchor ->
+                if (anchor.trackingState == TrackingState.TRACKING) {
+                    val p = anchor.pose
+                    coverageOverlay.addCylinderWorldPoint(p.tx(), p.ty(), p.tz())
+                }
+            }
+        }
+    }
+
+    private fun updateAlignButtonText() {
+        val colors = arrayOf(getString(R.string.rojo), getString(R.string.verde), getString(R.string.azul))
+        binding.btnAlign.text = getString(R.string.marcar_color, colors[currentAlignIndex])
     }
 
     private fun saveAlignPointsToPrefs() {
@@ -239,7 +360,9 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
                 put("imu", JSONObject().apply { put("accel", JSONArray(pt.imuAccel)); put("gyro", JSONArray(pt.imuGyro)); put("orient", JSONArray(pt.imuOrient)) })
             }
         }).toString()
-        requireContext().getSharedPreferences("refractory_prefs", Context.MODE_PRIVATE).edit().putString("align_pts_json", json).apply()
+        requireContext().getSharedPreferences("refractory_prefs", Context.MODE_PRIVATE).edit(commit = true) {
+            putString("align_pts_json", json)
+        }
     }
 
     private fun loadAlignPointsFromPrefs() {
@@ -252,7 +375,7 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
                 alignPoints.add(AlignPoint(index = obj.getInt("index"), frameId = obj.getInt("frame_id"), worldX = obj.optDouble("worldX", 0.0).toFloat(), worldY = obj.optDouble("worldY", 0.0).toFloat(), worldZ = obj.optDouble("worldZ", 0.0).toFloat(), imuAccel = jsonArrayToList(imu.getJSONArray("accel")), imuGyro = jsonArrayToList(imu.getJSONArray("gyro")), imuOrient = jsonArrayToList(imu.getJSONArray("orient"))) )
             }
             coverageOverlay.setAlignPoints(alignPoints)
-        } catch (e: Exception) { Log.e("CaptureFragment", "Load points failed", e) }
+        } catch (_: Exception) { Log.e("CaptureFragment", "Load points failed") }
     }
 
     private fun jsonArrayToList(array: JSONArray): List<Float> {
@@ -266,22 +389,123 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
 
     private fun updateUI() {
         val count = capturedFrames.size
-        binding.tvCounter.text = "$count / $TARGET_FRAMES fotos"
+        binding.tvCounter.text = getString(R.string.fotos_counter, count, TARGET_FRAMES)
         binding.progressBar.progress = count
         binding.btnSend.isEnabled = count >= 30
-        binding.btnSend.text = "ENVIAR $count →"
-        if (!args.isAutomatic && !isCapturing) binding.btnCapture.text = "● CAPTURAR"
+        binding.btnSend.text = getString(R.string.btn_enviar, count)
+        if (!args.isAutomatic && !isCapturing) binding.btnCapture.text = getString(R.string.btn_capturar)
     }
 
     private fun updateStabilityIndicator(stable: Boolean) {
-        binding.tvGyro.text = if (stable) "● Estable" else "⚠ Muy rápido"
+        binding.tvGyro.text = if (stable) getString(R.string.estable) else getString(R.string.muy_rapido)
         binding.tvGyro.setTextColor(ContextCompat.getColor(requireContext(), if (stable) android.R.color.holo_green_light else android.R.color.holo_orange_light))
     }
 
-    private fun sendData() {
+    // ── streaming upload ──────────────────────────────────────────────────────
+
+    private fun ensureJobCreated() {
+        if (FrameStore.currentJobId.isNotEmpty()) { startUploadLoop(); return }
+        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val req = Request.Builder().url("http://${args.serverIp}:5005/new_job")
+                    .post("".toRequestBody()).build()
+                val jid = httpClient.newCall(req).execute().use {
+                    JSONObject(it.body!!.string()).getString("job_id")
+                }
+                FrameStore.currentJobId = jid
+                withContext(Dispatchers.Main) { updateUploadStatus() }
+                startUploadLoop()
+            } catch (e: Exception) {
+                Log.e("CaptureFragment", "create job failed: $e")
+            }
+        }
+    }
+
+    private fun startUploadLoop() {
+        uploadLoopJob?.cancel()
+        uploadLoopJob = viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                val pending = synchronized(capturedFrames) {
+                    capturedFrames.filter {
+                        it.frameId !in FrameStore.uploadedFrameIds && it.jpegBytes != null
+                    }.toList()
+                }
+                for (frame in pending) {
+                    if (!isActive) break
+                    if (uploadFrame(frame)) {
+                        FrameStore.uploadedFrameIds.add(frame.frameId)
+                        frame.jpegBytes = null   // liberar memoria
+                        withContext(Dispatchers.Main) { updateUploadStatus() }
+                    }
+                }
+                delay(400)
+            }
+        }
+    }
+
+    private fun uploadFrame(frame: CapturedFrame): Boolean {
+        val bytes = frame.jpegBytes ?: return true
+        val jid   = FrameStore.currentJobId.takeIf { it.isNotEmpty() } ?: return false
+        val meta  = JSONObject().apply {
+            put("frame_id", frame.frameId); put("timestamp_ms", System.currentTimeMillis())
+            put("imu", frame.imu); put("camera", frame.camera)
+        }
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("image", "f.jpg", bytes.toRequestBody("image/jpeg".toMediaType()))
+            .addFormDataPart("meta", meta.toString())
+            .build()
+        return try {
+            httpClient.newCall(
+                Request.Builder().url("http://${args.serverIp}:5005/upload_frame/$jid/${frame.frameId}")
+                    .post(body).build()
+            ).execute().use { it.isSuccessful }
+        } catch (e: Exception) { false }
+    }
+
+    private fun updateUploadStatus() {
+        val uploaded = FrameStore.uploadedFrameIds.size
+        val total    = capturedFrames.size
+        val jid      = FrameStore.currentJobId
+        val label    = if (jid.isEmpty()) "Sin conexión" else "↑ $uploaded/$total subidas"
+        binding.tvUploadStatus?.text = label
+    }
+
+    private fun viewPointCloud() {
+        val jid = FrameStore.currentJobId
+        if (jid.isEmpty() || FrameStore.uploadedFrameIds.size < 5) {
+            Toast.makeText(context, "Esperá — se están subiendo las fotos (mín. 5)", Toast.LENGTH_SHORT).show()
+            return
+        }
         stopAutoCapture()
-        FrameStore.frames = capturedFrames.toList()
-        findNavController().navigate(CaptureFragmentDirections.actionCaptureToProgress(args.serverIp, capturedFrames.map { it.frameId }.toIntArray(), capturedFrames.size))
+        uploadLoopJob?.cancel()
+
+        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val alignJson = requireContext()
+                    .getSharedPreferences("refractory_prefs", Context.MODE_PRIVATE)
+                    .getString("align_pts_json", "[]")
+                val json = JSONObject().apply {
+                    put("total_frames", FrameStore.uploadedFrameIds.size)
+                    put("align_pts", JSONArray(alignJson))
+                    put("mode", "preview")
+                }
+                httpClient.newCall(
+                    Request.Builder().url("http://${args.serverIp}:5005/start_reconstruct/$jid")
+                        .post(json.toString().toRequestBody("application/json".toMediaType()))
+                        .build()
+                ).execute().close()
+
+                withContext(Dispatchers.Main) {
+                    findNavController().navigate(
+                        CaptureFragmentDirections.actionCaptureToPointCloud(args.serverIp, jid)
+                    )
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
     }
 
     override fun onResume() {
@@ -290,7 +514,7 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
             if (ArCoreApk.getInstance().requestInstall(requireActivity(), !installRequested) == ArCoreApk.InstallStatus.INSTALL_REQUESTED) { installRequested = true; return }
             setupArSession()
         }
-        try { arSession?.resume() } catch (e: Exception) { arSession = null }
+        try { arSession?.resume() } catch (_: Exception) { arSession = null }
         sensorManager.registerListener(this, sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER), SensorManager.SENSOR_DELAY_UI)
         sensorManager.registerListener(this, sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE), SensorManager.SENSOR_DELAY_UI)
         sensorManager.registerListener(this, sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR), SensorManager.SENSOR_DELAY_UI)
@@ -335,12 +559,21 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
         arSession?.setCameraTextureName(textureId)
 
+        program = createDefaultProgram()
+    }
+
+    private fun createDefaultProgram(): Int {
         val vShader = "attribute vec4 a_Pos; attribute vec2 a_Tex; varying vec2 v_Tex; void main() { gl_Position = a_Pos; v_Tex = a_Tex; }"
         val fShader = "#extension GL_OES_EGL_image_external : require\nprecision mediump float; uniform samplerExternalOES s_Tex; varying vec2 v_Tex; void main() { gl_FragColor = texture2D(s_Tex, v_Tex); }"
-        program = createProgram(vShader, fShader)
+        
+        val vs = GLES20.glCreateShader(GLES20.GL_VERTEX_SHADER).apply { GLES20.glShaderSource(this, vShader); GLES20.glCompileShader(this) }
+        val fs = GLES20.glCreateShader(GLES20.GL_FRAGMENT_SHADER).apply { GLES20.glShaderSource(this, fShader); GLES20.glCompileShader(this) }
+        return GLES20.glCreateProgram().apply { GLES20.glAttachShader(this, vs); GLES20.glAttachShader(this, fs); GLES20.glLinkProgram(this) }
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
+        surfaceWidth = width
+        surfaceHeight = height
         GLES20.glViewport(0, 0, width, height)
         arSession?.setDisplayGeometry(0, width, height)
     }
@@ -350,6 +583,7 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
         val session = arSession ?: return
         try {
             val frame = session.update()
+            latestFrame = frame
             val arCamera = frame.camera
             lastArPose = arCamera.pose
             
@@ -377,20 +611,45 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
             if (arCamera.trackingState == TrackingState.TRACKING) {
-                activity?.runOnUiThread { coverageOverlay.updateArCamera(arCamera) }
-            }
-        } catch (e: Exception) {
-            Log.e("CaptureFragment", "Draw frame failed", e)
-        }
-    }
+                activity?.runOnUiThread { 
+                    if (_binding == null) return@runOnUiThread
+                    updateOverlayPoints() // Actualizar posiciones desde los anchors
+                    coverageOverlay.updateArCamera(arCamera)
+                    binding.tvStatus.text = getString(R.string.status_tracking_ok)
+                }
 
-    private fun createProgram(v: String, f: String): Int {
-        val vs = GLES20.glCreateShader(GLES20.GL_VERTEX_SHADER).apply { GLES20.glShaderSource(this, v); GLES20.glCompileShader(this) }
-        val fs = GLES20.glCreateShader(GLES20.GL_FRAGMENT_SHADER).apply { GLES20.glShaderSource(this, f); GLES20.glCompileShader(this) }
-        return GLES20.glCreateProgram().apply { GLES20.glAttachShader(this, vs); GLES20.glAttachShader(this, fs); GLES20.glLinkProgram(this) }
+                if (isPhotoPending) {
+                    isPhotoPending = false
+                    isTakingPhoto = true
+                    try {
+                        val image = frame.acquireCameraImage()
+                        val frameId = capturedFrames.size
+                        val callback = photoCallback
+                        photoCallback = null
+                        // Procesar en segundo plano para no bloquear el renderizado
+                        cameraExecutor.execute { processPhoto(image, frameId, callback) }
+                    } catch (_: Exception) {
+                        isTakingPhoto = false
+                        Log.e("CaptureFragment", "Frame acquisition failed")
+                    }
+                }
+            } else {
+                activity?.runOnUiThread { 
+                    if (_binding == null) return@runOnUiThread
+                    binding.tvStatus.text = getString(R.string.status_buscando_superficie)
+                }
+            }
+        } catch (_: Exception) {
+            Log.e("CaptureFragment", "Draw frame failed")
+        }
     }
 
     private fun floatBufferOf(data: FloatArray): FloatBuffer = ByteBuffer.allocateDirect(data.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().put(data).apply { position(0) }
 
-    override fun onDestroyView() { super.onDestroyView(); cameraExecutor.shutdown(); _binding = null }
+    override fun onDestroyView() {
+        super.onDestroyView()
+        uploadLoopJob?.cancel()
+        cameraExecutor.shutdown()
+        _binding = null
+    }
 }

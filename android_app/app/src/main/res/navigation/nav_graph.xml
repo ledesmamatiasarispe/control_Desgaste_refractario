@@ -34,6 +34,8 @@
         <argument android:name="isAutomatic" app:argType="boolean" android:defaultValue="true"/>
         <action android:id="@+id/action_capture_to_progress"
             app:destination="@id/progressFragment"/>
+        <action android:id="@+id/action_capture_to_point_cloud"
+            app:destination="@id/pointCloudViewerFragment"/>
     </fragment>
 
     <fragment android:id="@+id/progressFragment"

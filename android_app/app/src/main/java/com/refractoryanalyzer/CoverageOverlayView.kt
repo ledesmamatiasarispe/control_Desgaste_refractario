@@ -17,7 +17,7 @@ class CoverageOverlayView @JvmOverloads constructor(
 
     // ── coverage grid (ANGULAR) ───────────────────────────────────────────────
     private val YAW_SECTORS   = 36
-    private val PITCH_SECTORS = 5
+    private val PITCH_SECTORS = 15 // Sincronizado con los niveles del cilindro
     private val coverage = Array(YAW_SECTORS) { BooleanArray(PITCH_SECTORS) }
 
     private var currentYaw   = 0f
@@ -27,14 +27,21 @@ class CoverageOverlayView @JvmOverloads constructor(
     
     private var arCamera: com.google.ar.core.Camera? = null
 
-    // ── 3D World Points ───────────────────────────────────────────────────────
+    // ── 3D World Points & Cylinder ──────────────────────────────────────────
     data class WorldPoint(val x: Float, val y: Float, val z: Float)
     private val cylinderPoints = mutableListOf<WorldPoint>()
     private var alignPoints = mutableListOf<CaptureFragment.AlignPoint>()
 
+    private var hasCylinder = false
+    private var cylCenterWorldX = 0f
+    private var cylCenterWorldZ = 0f
+    private var cylRadius = 0f
+
     // ── paints ────────────────────────────────────────────────────────────────
     private val paintCovered = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(200, 80, 220, 100); style = Paint.Style.FILL }
     private val paintEmpty = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(100, 180, 180, 180); style = Paint.Style.FILL }
+    private val paintCylCovered = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(140, 80, 220, 100); style = Paint.Style.FILL }
+    private val paintCylEmpty = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(60, 255, 230, 100); style = Paint.Style.FILL_AND_STROKE; strokeWidth = 2f }
     private val paintCurrent = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(230, 255, 220, 0); style = Paint.Style.STROKE; strokeWidth = 4f }
     private val paintArrow = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(220, 255, 100, 60); style = Paint.Style.FILL }
     private val paintText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 42f; typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER; setShadowLayer(4f, 2f, 2f, Color.BLACK) }
@@ -61,12 +68,38 @@ class CoverageOverlayView @JvmOverloads constructor(
     }
 
     fun markCaptured(yaw: Float, pitch: Float) {
-        coverage[yawToSector(yaw)][pitchToSector(pitch)] = true; invalidate()
+        val camera = arCamera
+        if (hasCylinder && camera != null && camera.trackingState == TrackingState.TRACKING) {
+            val baseY = cylinderPoints[0].y
+            val heightStep = 0.4f
+            
+            // Proyectamos cada celda del cilindro a la pantalla para ver si es visible
+            for (i in 0 until YAW_SECTORS) {
+                val angle = Math.toRadians(i * 360.0 / YAW_SECTORS)
+                val worldX = cylCenterWorldX + cylRadius * cos(angle).toFloat()
+                val worldZ = cylCenterWorldZ + cylRadius * sin(angle).toFloat()
+                
+                for (j in 0 until PITCH_SECTORS) {
+                    val worldY = baseY + (j - PITCH_SECTORS / 2f) * heightStep
+                    
+                    // Verificamos si este punto del cilindro cae dentro de la pantalla
+                    val screenPt = projectWorldPoint(worldX, worldY, worldZ)
+                    if (screenPt != null && screenPt.x >= 0 && screenPt.x <= width && screenPt.y >= 0 && screenPt.y <= height) {
+                        // Opcional: Podríamos verificar si el punto está de frente a la cámara
+                        coverage[i][j] = true
+                    }
+                }
+            }
+        } else {
+            // Fallback si no hay cilindro definido aún
+            coverage[yawToSector(yaw)][pitchToSector(pitch)] = true
+        }
+        invalidate()
     }
 
     fun reset() {
         for (row in coverage) row.fill(false)
-        cylinderPoints.clear(); alignPoints.clear(); invalidate()
+        cylinderPoints.clear(); alignPoints.clear(); hasCylinder = false; invalidate()
     }
 
     fun coveragePercent(): Int {
@@ -75,10 +108,34 @@ class CoverageOverlayView @JvmOverloads constructor(
         return (covered * 100 / total)
     }
 
+    fun resetCylinderPoints() {
+        cylinderPoints.clear()
+        hasCylinder = false
+    }
+
     fun addCylinderWorldPoint(x: Float, y: Float, z: Float) {
-        if (cylinderPoints.size >= 3) cylinderPoints.clear()
+        if (cylinderPoints.size >= 3) {
+            cylinderPoints.clear()
+            hasCylinder = false
+        }
         cylinderPoints.add(WorldPoint(x, y, z))
+        if (cylinderPoints.size == 3) calculateCircle()
         invalidate()
+    }
+
+    private fun calculateCircle() {
+        if (cylinderPoints.size < 3) return
+        val x1 = cylinderPoints[0].x; val z1 = cylinderPoints[0].z
+        val x2 = cylinderPoints[1].x; val z2 = cylinderPoints[1].z
+        val x3 = cylinderPoints[2].x; val z3 = cylinderPoints[2].z
+
+        val d = 2 * (x1 * (z2 - z3) + x2 * (z3 - z1) + x3 * (z1 - z2))
+        if (abs(d) < 0.001f) return
+
+        cylCenterWorldX = ((x1 * x1 + z1 * z1) * (z2 - z3) + (x2 * x2 + z2 * z2) * (z3 - z1) + (x3 * x3 + z3 * z3) * (z1 - z2)) / d
+        cylCenterWorldZ = ((x1 * x1 + z1 * z1) * (x3 - x2) + (x2 * x2 + z2 * z2) * (x1 - x3) + (x3 * x3 + z3 * z3) * (x2 - x1)) / d
+        cylRadius = sqrt((x1 - cylCenterWorldX).pow(2) + (z1 - cylCenterWorldZ).pow(2))
+        hasCylinder = true
     }
 
     fun addAlignPoint(pt: CaptureFragment.AlignPoint) {
@@ -107,26 +164,45 @@ class CoverageOverlayView @JvmOverloads constructor(
     }
 
     private fun projectWorldPoint(x: Float, y: Float, z: Float): PointF? {
-        val camera = arCamera ?: return null
-        if (camera.trackingState != TrackingState.TRACKING) return null
+        val camera = arCamera
+        // Si el tracking es bueno, usamos ARCore
+        if (camera != null && camera.trackingState == TrackingState.TRACKING) {
+            val projmtx = FloatArray(16)
+            camera.getProjectionMatrix(projmtx, 0, 0.005f, 100.0f)
+            val viewmtx = FloatArray(16)
+            camera.getViewMatrix(viewmtx, 0)
+            val vpMtx = FloatArray(16)
+            android.opengl.Matrix.multiplyMM(vpMtx, 0, projmtx, 0, viewmtx, 0)
+            val vertex = floatArrayOf(x, y, z, 1f)
+            val screenPos = floatArrayOf(0f, 0f, 0f, 0f)
+            android.opengl.Matrix.multiplyMV(screenPos, 0, vpMtx, 0, vertex, 0)
+            if (screenPos[3] > 0) {
+                val sx = (screenPos[0] / screenPos[3] + 1f) * 0.5f * width
+                val sy = (1f - screenPos[1] / screenPos[3]) * 0.5f * height
+                return PointF(sx, sy)
+            }
+        }
         
-        val projmtx = FloatArray(16)
-        camera.getProjectionMatrix(projmtx, 0, 0.1f, 100.0f)
-        val viewmtx = FloatArray(16)
-        camera.getViewMatrix(viewmtx, 0)
+        // Si el tracking falla, usamos una proyección de respaldo basada en Sensores (IMU)
+        // Esto evita que los puntos "salten" al techo
+        return projectDirectionBasedOnSensors(x, y, z)
+    }
+
+    private fun projectDirectionBasedOnSensors(x: Float, y: Float, z: Float): PointF? {
+        // Cálculo matemático para mantener el cilindro estable usando solo el Giroscopio
+        val dx = x - cylCenterWorldX
+        val dz = z - cylCenterWorldZ
+        val targetYaw = Math.toDegrees(atan2(dz.toDouble(), dx.toDouble())).toFloat()
         
-        val vpMtx = FloatArray(16)
-        android.opengl.Matrix.multiplyMM(vpMtx, 0, projmtx, 0, viewmtx, 0)
+        var dy = targetYaw - currentYaw
+        while (dy > 180) dy -= 360; while (dy < -180) dy += 360
         
-        val vertex = floatArrayOf(x, y, z, 1f)
-        val screenPos = floatArrayOf(0f, 0f, 0f, 0f)
-        android.opengl.Matrix.multiplyMV(screenPos, 0, vpMtx, 0, vertex, 0)
+        // Aproximación visual para que no desaparezca el cilindro
+        val pxPerDeg = width / 70f
+        val rx = dy * pxPerDeg
+        val ry = (0f - currentPitch) * pxPerDeg // Asumimos nivel de ojos si no hay tracking
         
-        if (screenPos[3] <= 0) return null
-        
-        val sx = (screenPos[0] / screenPos[3] + 1f) * 0.5f * width
-        val sy = (1f - screenPos[1] / screenPos[3]) * 0.5f * height
-        return PointF(sx, sy)
+        return PointF(width / 2f + rx, height / 2f + ry)
     }
 
     // ── drawing ───────────────────────────────────────────────────────────────
@@ -134,13 +210,51 @@ class CoverageOverlayView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         if (width == 0 || height == 0) return
-        drawCoverageRing(canvas); drawHeightBar(canvas); drawGuideHint(canvas); drawCoveragePercent(canvas)
+        drawGuideHint(canvas); drawCoveragePercent(canvas)
         drawCylinder(canvas); drawAlignPoints(canvas); drawCrosshair(canvas)
     }
 
     private fun drawCylinder(canvas: Canvas) {
-        for (pt in cylinderPoints) {
-            projectWorldPoint(pt.x, pt.y, pt.z)?.let { canvas.drawCircle(it.x, it.y, 20f, paintCylPoint) }
+        if (!hasCylinder) {
+            for (pt in cylinderPoints) {
+                projectWorldPoint(pt.x, pt.y, pt.z)?.let { canvas.drawCircle(it.x, it.y, 20f, paintCylPoint) }
+            }
+            return
+        }
+
+        val baseY = cylinderPoints[0].y
+        val sectors = YAW_SECTORS
+        val levels = PITCH_SECTORS // Usar la misma variable para consistencia
+        val heightStep = 0.4f 
+
+        for (i in 0 until sectors) {
+            val angle1 = Math.toRadians(i * 360.0 / sectors)
+            val angle2 = Math.toRadians((i + 1) * 360.0 / sectors)
+            
+            val cos1 = cos(angle1).toFloat(); val sin1 = sin(angle1).toFloat()
+            val cos2 = cos(angle2).toFloat(); val sin2 = sin(angle2).toFloat()
+
+            for (j in 0 until levels) {
+                val yBottom = baseY + (j - levels / 2f) * heightStep
+                val yTop = yBottom + heightStep
+                
+                val p1 = projectWorldPoint(cylCenterWorldX + cylRadius * cos1, yBottom, cylCenterWorldZ + cylRadius * sin1)
+                val p2 = projectWorldPoint(cylCenterWorldX + cylRadius * cos2, yBottom, cylCenterWorldZ + cylRadius * sin2)
+                val p3 = projectWorldPoint(cylCenterWorldX + cylRadius * cos2, yTop, cylCenterWorldZ + cylRadius * sin2)
+                val p4 = projectWorldPoint(cylCenterWorldX + cylRadius * cos1, yTop, cylCenterWorldZ + cylRadius * sin1)
+
+                if (p1 != null && p2 != null && p3 != null && p4 != null) {
+                    val path = Path()
+                    path.moveTo(p1.x, p1.y)
+                    path.lineTo(p2.x, p2.y)
+                    path.lineTo(p3.x, p3.y)
+                    path.lineTo(p4.x, p4.y)
+                    path.close()
+                    
+                    val paint = if (coverage[i][j]) paintCylCovered else paintCylEmpty
+                    canvas.drawPath(path, paint)
+                }
+            }
         }
     }
 

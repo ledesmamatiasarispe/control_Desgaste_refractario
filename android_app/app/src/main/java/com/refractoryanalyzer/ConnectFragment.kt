@@ -47,7 +47,7 @@ class ConnectFragment : Fragment() {
         binding.btnConnect.setOnClickListener {
             val ip = binding.editIp.text.toString().trim()
             if (ip.isEmpty()) {
-                showError("Ingresá la IP del PC")
+                showError(getString(R.string.ingresar_ip))
             } else {
                 testConnection(ip)
             }
@@ -57,7 +57,7 @@ class ConnectFragment : Fragment() {
     private fun testConnection(ip: String) {
         binding.btnConnect.isEnabled = false
         binding.progressBar.visibility = View.VISIBLE
-        binding.tvStatus.text = "Conectando…"
+        binding.tvStatus.text = getString(R.string.conectando)
 
         lifecycleScope.launch {
             val isOk = withContext(Dispatchers.IO) {
@@ -67,7 +67,7 @@ class ConnectFragment : Fragment() {
                     http.newCall(request).execute().use { response ->
                         response.isSuccessful
                     }
-                } catch (e: Exception) {
+                } catch (ignored: Exception) {
                     false
                 }
             }
@@ -76,7 +76,7 @@ class ConnectFragment : Fragment() {
             binding.progressBar.visibility = View.GONE
 
             if (isOk) {
-                binding.tvStatus.text = "✓ Conectado"
+                binding.tvStatus.text = getString(R.string.conectado)
                 // Guardar IP exitosa
                 requireContext().getSharedPreferences("refractory_prefs", Context.MODE_PRIVATE).edit {
                     putString("server_ip", ip)
@@ -86,8 +86,8 @@ class ConnectFragment : Fragment() {
                 val action = ConnectFragmentDirections.actionConnectToSelection(ip)
                 findNavController().navigate(action)
             } else {
-                binding.tvStatus.text = "No se pudo conectar a $ip:5005"
-                showError("Servidor no encontrado. Verificá la IP y el WiFi.")
+                binding.tvStatus.text = getString(R.string.error_conexion, ip)
+                showError(getString(R.string.error_servidor))
             }
         }
     }

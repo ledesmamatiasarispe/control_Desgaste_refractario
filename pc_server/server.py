@@ -119,7 +119,7 @@ def upload_frame(job_id: str, frame_id: int):
     job = _job(job_id)
     if job is None:
         return jsonify({"error": "job not found"}), 404
-    if job.status not in ("waiting", "uploading"):
+    if job.status not in ("waiting", "uploading", "preview_done"):
         return jsonify({"error": f"job is {job.status}, not accepting frames"}), 400
 
     # Save image
@@ -136,7 +136,7 @@ def upload_frame(job_id: str, frame_id: int):
     meta_path.write_text(meta_str)
 
     with _lock:
-        job.status = "uploading"
+        job.status = "uploading"   # reset preview_done if user adds more photos
         job.received_frames.add(frame_id)
 
     log.debug(f"Job {job_id}: received frame {frame_id}")
@@ -161,7 +161,7 @@ def start_reconstruct(job_id: str):
 
     data = request.get_json(silent=True) or {}
     job.total_frames = data.get("total_frames", len(job.received_frames))
-    mode = data.get("mode", "full")   # "preview" → solo SfM | "full" → SfM + MVS + malla
+    mode = data.get("mode", "full")   # preview_done jobs can be re-run with more frames   # "preview" → solo SfM | "full" → SfM + MVS + malla
 
     if len(job.received_frames) < 5:
         return jsonify({"error": "se necesitan al menos 5 fotogramas"}), 400

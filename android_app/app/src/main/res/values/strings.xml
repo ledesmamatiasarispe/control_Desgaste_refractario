@@ -1,4 +1,45 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Refractory Capture</string>
+    <string name="permiso_camara_requerido">Permiso de cámara requerido</string>
+    <string name="btn_detener">■ DETENER</string>
+    <string name="btn_iniciar">● INICIAR</string>
+    <string name="btn_capturar">● CAPTURAR</string>
+    <string name="btn_enviar">ENVIAR %1$d →</string>
+    <string name="status_tracking_ok">Tracking OK - Apuntá al refractario</string>
+    <string name="status_buscando_superficie">⚠️ Buscando superficie... (mové el teléfono)</string>
+    <string name="estable">● Estable</string>
+    <string name="muy_rapido">⚠ Muy rápido</string>
+    <string name="error_captura">Error al capturar imagen</string>
+    <string name="marcar_color">📍 Marcar %1$s</string>
+    <string name="rojo">Rojo</string>
+    <string name="verde">Verde</string>
+    <string name="azul">Azul</string>
+    <string name="fotos_counter">%1$d / %2$d fotos</string>
+
+    <!-- ConnectFragment -->
+    <string name="conectando">Conectando…</string>
+    <string name="conectado">✓ Conectado</string>
+    <string name="error_conexion">No se pudo conectar a %1$s:5005</string>
+    <string name="error_servidor">Servidor no encontrado. Verificá la IP y el WiFi.</string>
+    <string name="ingresar_ip">Ingresá la IP del PC</string>
+
+    <!-- SelectionFragment -->
+    <string name="modo_automatico">Modo Automático</string>
+    <string name="desc_automatico">La app saca fotos automáticamente cuando el dispositivo está estable.</string>
+    <string name="modo_manual">Modo Manual</string>
+    <string name="desc_manual">Capturá cada foto manualmente presionando el botón.</string>
+    <string name="calibrar_sensores">Calibrar Sensores</string>
+    <string name="desc_calibracion">Mejorá la estabilidad de los puntos y el cilindro si notás saltos.</string>
+    <string name="selecciona_modo">Seleccioná el modo de captura</string>
+
+    <!-- CalibrationFragment -->
+    <string name="calibracion_sensores">Calibración de Sensores</string>
+    <string name="instruccion_calibracion">Mové tu teléfono dibujando un \'8\' en el aire de forma lenta y constante.</string>
+    <string name="analizando_ruido">Analizando ruido del giroscopio…</string>
+    <string name="detectando_movimiento">Detectando movimiento del giroscopio…</string>
+    <string name="calibrando_acelerometro">Calibrando acelerómetro…</string>
+    <string name="sincronizando_arcore">Sincronizando con ARCore…</string>
+    <string name="sensores_optimizados">✅ Sensores Optimizados</string>
+    <string name="finalizar">FINALIZAR</string>
 </resources>

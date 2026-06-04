@@ -10,7 +10,7 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Seleccioná el modo de captura"
+        android:text="@string/selecciona_modo"
         android:textSize="20sp"
         android:textStyle="bold"
         android:layout_marginBottom="32dp" />
@@ -34,7 +34,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Modo Automático"
+                android:text="@string/modo_automatico"
                 android:textSize="18sp"
                 android:textStyle="bold"
                 android:textColor="?attr/colorPrimary" />
@@ -42,7 +42,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="La app saca fotos automáticamente cuando el dispositivo está estable."
+                android:text="@string/desc_automatico"
                 android:textSize="14sp"
                 android:layout_marginTop="4dp" />
         </LinearLayout>
@@ -50,6 +50,39 @@
 
     <com.google.android.material.card.MaterialCardView
         android:id="@+id/card_manual"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:clickable="true"
+        android:focusable="true"
+        app:cardCornerRadius="12dp"
+        app:cardElevation="4dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="20dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/modo_manual"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:textColor="?attr/colorPrimary" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/desc_manual"
+                android:textSize="14sp"
+                android:layout_marginTop="4dp" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/card_calibrate"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:clickable="true"
@@ -66,15 +99,15 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Modo Manual"
+                android:text="@string/calibrar_sensores"
                 android:textSize="18sp"
                 android:textStyle="bold"
-                android:textColor="?attr/colorPrimary" />
+                android:textColor="#FF9800" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Capturá cada foto manualmente presionando el botón."
+                android:text="@string/desc_calibracion"
                 android:textSize="14sp"
                 android:layout_marginTop="4dp" />
         </LinearLayout>
