@@ -28,9 +28,9 @@ app = Flask(__name__)
 
 # ── job storage ───────────────────────────────────────────────────────────────
 
-# Fotos e imágenes temporales de cada job — carpeta fija y visible para el usuario
-WORK_ROOT = pathlib.Path(tempfile.gettempdir()) / "refractory_capture"
-WORK_ROOT.mkdir(exist_ok=True)
+# Carpeta persistente para fotos y trabajos (sobrevive reinicios)
+WORK_ROOT = pathlib.Path.home() / ".refractory_capture" / "jobs"
+WORK_ROOT.mkdir(parents=True, exist_ok=True)
 
 # Where finished meshes are copied for the desktop app
 OUTPUT_DIR = pathlib.Path(r"D:\stl hornos\reconstructions")
@@ -87,9 +87,54 @@ _jobs: Dict[str, Job] = {}
 _lock = threading.Lock()
 
 
+def _load_existing_jobs():  # noqa — called at end of module setup
+    """Escanea WORK_ROOT al arrancar y reconstruye los jobs que haya en disco."""
+    for job_dir in WORK_ROOT.iterdir():
+        if not job_dir.is_dir():
+            continue
+        jid = job_dir.name
+        images = list((job_dir / "images").glob("*.jpg")) if (job_dir / "images").exists() else []
+        if not images:
+            continue
+        # Determinar estado
+        mesh = job_dir / "output" / "mesh.obj"
+        ply  = job_dir / "output" / "sparse.ply"
+        imu  = job_dir / "imu_summary.json"
+        if mesh.exists():
+            status = "done"
+            out_path = str(mesh)
+        elif ply.exists():
+            status = "preview_done"
+            out_path = None
+        elif imu.exists():
+            status = "uploading"
+            out_path = None
+        else:
+            status = "waiting"
+            out_path = None
+
+        job = Job(
+            job_id         = jid,
+            status         = status,
+            progress       = 100 if status in ("done", "preview_done") else 0,
+            message        = f"Cargado desde disco ({len(images)} fotos)",
+            received_frames= set(range(len(images))),
+            total_frames   = len(images),
+            output_path    = out_path,
+            sparse_ply     = str(ply) if ply.exists() else None,
+            created_at     = job_dir.stat().st_mtime,
+        )
+        with _lock:
+            _jobs[jid] = job
+        log.info(f"Loaded existing job {jid} ({status}, {len(images)} frames)")
+
+
 def _job(job_id: str) -> Optional[Job]:
     with _lock:
         return _jobs.get(job_id)
+
+
+_load_existing_jobs()   # poblar _jobs con lo que haya en disco al arrancar
 
 
 def _new_job() -> Job:
@@ -252,6 +297,43 @@ def download(job_id: str):
 def list_jobs():
     with _lock:
         return jsonify([j.to_dict() for j in _jobs.values()])
+
+
+@app.post("/import_folder")
+def import_folder():
+    """Importar una carpeta existente con imágenes como nuevo job."""
+    data   = request.get_json(silent=True) or {}
+    folder = data.get("folder", "")
+    if not folder:
+        return jsonify({"error": "folder requerido"}), 400
+
+    img_dir = pathlib.Path(folder)
+    # Aceptar si la carpeta tiene JPEGs o es una carpeta images/ dentro de un job
+    if (img_dir / "images").exists():
+        img_dir = img_dir / "images"
+
+    images = sorted(img_dir.glob("*.jpg"))
+    if not images:
+        return jsonify({"error": f"No se encontraron imágenes en {folder}"}), 400
+
+    import shutil
+    job = _new_job()
+    jid = job.job_id
+    dst = WORK_ROOT / jid / "images"
+    dst.mkdir(parents=True, exist_ok=True)
+
+    # Copiar o enlazar imágenes al directorio del job
+    for i, img in enumerate(images):
+        shutil.copy2(str(img), str(dst / f"{i:05d}.jpg"))
+
+    with _lock:
+        job.received_frames = set(range(len(images)))
+        job.total_frames    = len(images)
+        job.status          = "uploading"
+        job.message         = f"Importado desde {pathlib.Path(folder).name} ({len(images)} fotos)"
+
+    log.info(f"Imported {len(images)} images from {folder} → job {jid}")
+    return jsonify({"job_id": jid, "frames": len(images)})
 
 
 # ── reconstruction workers ────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 """Panel de trabajos del servidor — muestra progreso de cada scan y permite regenerar."""
 
 import json
+import pathlib
 import threading
 from datetime import datetime
 from typing import Optional
@@ -8,7 +9,7 @@ from typing import Optional
 from PySide6.QtCore    import Qt, Signal, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QFrame, QProgressBar, QSizePolicy,
+    QScrollArea, QFrame, QProgressBar, QSizePolicy, QFileDialog,
 )
 from PySide6.QtGui import QColor, QPalette
 
@@ -140,6 +141,11 @@ class JobsPanel(QWidget):
         hdr.addWidget(self._btn_refresh)
         lay.addLayout(hdr)
 
+        btn_import = QPushButton("📁 Buscar carpeta de escaneo…")
+        btn_import.setToolTip("Importar imágenes de una carpeta existente como nuevo trabajo")
+        btn_import.clicked.connect(self._browse_folder)
+        lay.addWidget(btn_import)
+
         self._lbl_server = QLabel("Sin servidor")
         self._lbl_server.setStyleSheet("color:#888; font-size:10px;")
         lay.addWidget(self._lbl_server)
@@ -246,6 +252,41 @@ class JobsPanel(QWidget):
             QMetaObject.invokeMethod(self, "_set_status",
                                      Qt.QueuedConnection,
                                      Q_ARG(str, f"Error: {e}"))
+
+    def _browse_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Seleccionar carpeta de escaneo",
+            str(pathlib.Path.home() / ".refractory_capture" / "jobs"),
+        )
+        if not folder:
+            return
+        if not self._server_ip:
+            self._lbl_status.setText("Sin servidor — reiniciá la app")
+            return
+        self._lbl_status.setText(f"Importando {pathlib.Path(folder).name}…")
+        ip = self._server_ip
+        threading.Thread(target=self._do_import, args=(ip, folder), daemon=True).start()
+
+    def _do_import(self, ip: str, folder: str):
+        try:
+            r = _requests.post(
+                f"http://{ip}:5005/import_folder",
+                json={"folder": folder},
+                timeout=30,
+            )
+            data = r.json()
+            if "error" in data:
+                msg = f"Error: {data['error']}"
+            else:
+                msg = f"Importado — {data['frames']} fotos (job {data['job_id']})"
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(self, "_set_status",
+                                     Qt.QueuedConnection, Q_ARG(str, msg))
+            self._fetch_jobs()
+        except Exception as e:
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(self, "_set_status",
+                                     Qt.QueuedConnection, Q_ARG(str, f"Error: {e}"))
 
     def _set_status(self, msg: str):
         self._lbl_status.setText(msg)
