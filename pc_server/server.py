@@ -62,6 +62,8 @@ def set_work_root(path: str):
     log.info(f"WORK_ROOT → {WORK_ROOT}")
 
 
+MAX_JOBS = 5
+
 @dataclass
 class Job:
     job_id:          str
@@ -73,6 +75,7 @@ class Job:
     output_path:     Optional[str] = None
     sparse_ply:      Optional[str] = None   # path to sparse point cloud PLY
     error:           Optional[str] = None
+    created_at:      float        = field(default_factory=lambda: __import__('time').time())
 
     def to_dict(self):
         d = asdict(self)
@@ -90,9 +93,18 @@ def _job(job_id: str) -> Optional[Job]:
 
 
 def _new_job() -> Job:
+    import shutil
     jid = str(uuid.uuid4())[:8]
     job = Job(job_id=jid)
     with _lock:
+        # Si ya hay MAX_JOBS, borrar el más viejo
+        if len(_jobs) >= MAX_JOBS:
+            oldest = min(_jobs.values(), key=lambda j: j.created_at)
+            del _jobs[oldest.job_id]
+            old_dir = WORK_ROOT / oldest.job_id
+            if old_dir.exists():
+                shutil.rmtree(old_dir, ignore_errors=True)
+            log.info(f"Job limit reached — evicted oldest job {oldest.job_id}")
         _jobs[jid] = job
     work_dir = WORK_ROOT / jid
     (work_dir / "images").mkdir(parents=True, exist_ok=True)
@@ -316,11 +328,8 @@ def _finalize_job(job: Job, obj_path: str):
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
     dest = OUTPUT_DIR / f"scan_{ts}_{job.job_id}.obj"
     shutil.copy2(obj_path, dest)
-    work_dir = WORK_ROOT / job.job_id
-    try:
-        shutil.rmtree(work_dir)
-    except Exception as e:
-        log.warning(f"Could not clean temp dir: {e}")
+    # Las fotos se conservan en WORK_ROOT/job_id/ — se borran solo cuando
+    # se evicta el job al superar MAX_JOBS
     with _lock:
         job.status      = "done"
         job.progress    = 100
