@@ -196,20 +196,27 @@ class JobsPanel(QWidget):
         return self._server_ip or "127.0.0.1"
 
     def _fetch_jobs(self):
-        if not _HAS_REQUESTS:
-            return
-        ip = self._effective_ip()
-        threading.Thread(target=self._do_fetch, args=(ip,), daemon=True).start()
+        threading.Thread(target=self._do_fetch, daemon=True).start()
 
-    def _do_fetch(self, ip: str):
+    def _do_fetch(self):
         try:
-            r = _requests.get(f"http://{ip}:5005/jobs", timeout=3)
-            jobs = r.json()
+            # Acceso directo al módulo del servidor (mismo proceso, más rápido)
+            import sys
+            srv = sys.modules.get("server")
+            if srv is not None:
+                with srv._lock:
+                    jobs = [j.to_dict() for j in srv._jobs.values()]
+            elif _HAS_REQUESTS:
+                r = _requests.get(f"http://{self._effective_ip()}:5005/jobs", timeout=3)
+                jobs = r.json()
+            else:
+                return
+
             from PySide6.QtCore import QMetaObject, Q_ARG
             QMetaObject.invokeMethod(self, "_update_jobs",
                                      Qt.QueuedConnection,
                                      Q_ARG(str, json.dumps(jobs)))
-        except Exception as e:
+        except Exception:
             pass
 
     def _update_jobs(self, jobs_json: str):
@@ -275,13 +282,14 @@ class JobsPanel(QWidget):
 
     def _browse_raw_folder(self):
         path = QFileDialog.getExistingDirectory(
-            self, "Seleccionar carpeta con fotos", self._browse_root,
+            self, "Seleccionar carpeta con fotos o trabajos", self._browse_root,
         )
         if not path:
             return
         self._lbl_status.setText(f"Importando {pathlib.Path(path).name}…")
-        threading.Thread(target=self._do_import,
-                         args=(self._effective_ip(), path), daemon=True).start()
+        # Intentar carga directa en el mismo proceso (más confiable que HTTP)
+        threading.Thread(target=self._do_import_direct,
+                         args=(path,), daemon=True).start()
 
     def _browse_refscan(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -294,6 +302,52 @@ class JobsPanel(QWidget):
         self._lbl_status.setText(f"Importando {pathlib.Path(path).name}…")
         threading.Thread(target=self._do_import_refscan,
                          args=(self._effective_ip(), path), daemon=True).start()
+
+    def _do_import_direct(self, folder: str):
+        """Carga trabajos directamente desde el módulo servidor (mismo proceso)."""
+        try:
+            import sys, pathlib as pl
+            # Importar módulo del servidor embebido
+            srv = sys.modules.get("server")
+            if srv is None:
+                # Fallback a HTTP si el módulo no está cargado
+                self._do_import(self._effective_ip(), folder)
+                return
+
+            root = pl.Path(folder)
+            loaded = []
+
+            # Detectar si la carpeta ES un job (tiene images/*.jpg)
+            img_dir = root / "images" if (root / "images").exists() else root
+            direct = list(img_dir.glob("*.jpg"))
+
+            if direct:
+                # La carpeta seleccionada es un job directamente
+                dirs_to_load = [root]
+            else:
+                # La carpeta contiene subcarpetas de jobs
+                dirs_to_load = [d for d in sorted(root.iterdir()) if d.is_dir()]
+
+            for job_dir in dirs_to_load:
+                job = srv._load_job_from_dir(job_dir)
+                if job:
+                    with srv._lock:
+                        srv._jobs[job.job_id] = job
+                    loaded.append(job.job_id)
+
+            if loaded:
+                msg = f"✓ {len(loaded)} trabajos cargados"
+            else:
+                msg = "No se encontraron fotos en la carpeta seleccionada"
+
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(self, "_set_status",
+                                     Qt.QueuedConnection, Q_ARG(str, msg))
+            self._fetch_jobs()
+        except Exception as e:
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(self, "_set_status",
+                                     Qt.QueuedConnection, Q_ARG(str, f"Error: {e}"))
 
     def _do_import(self, ip: str, folder: str):
         try:
