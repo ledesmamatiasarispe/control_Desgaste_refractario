@@ -60,6 +60,7 @@ def set_work_root(path: str):
     WORK_ROOT = pathlib.Path(path)
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
     log.info(f"WORK_ROOT → {WORK_ROOT}")
+    _load_existing_jobs(WORK_ROOT)   # cargar jobs de la nueva carpeta
 
 
 MAX_JOBS = 5
@@ -87,46 +88,57 @@ _jobs: Dict[str, Job] = {}
 _lock = threading.Lock()
 
 
-def _load_existing_jobs():  # noqa — called at end of module setup
-    """Escanea WORK_ROOT al arrancar y reconstruye los jobs que haya en disco."""
-    for job_dir in WORK_ROOT.iterdir():
+def _load_job_from_dir(job_dir: pathlib.Path) -> Optional[Job]:
+    """Crea un Job desde una carpeta existente. Retorna None si no tiene imágenes."""
+    # Buscar imágenes en job_dir/ o job_dir/images/
+    img_dir = job_dir / "images" if (job_dir / "images").exists() else job_dir
+    images  = list(img_dir.glob("*.jpg"))
+    if not images:
+        return None
+
+    mesh = job_dir / "output" / "mesh.obj"
+    ply  = job_dir / "output" / "sparse.ply"
+    imu  = job_dir / "imu_summary.json"
+
+    if mesh.exists():   status, out_path = "done",         str(mesh)
+    elif ply.exists():  status, out_path = "preview_done", None
+    elif imu.exists():  status, out_path = "uploading",    None
+    else:               status, out_path = "waiting",      None
+
+    return Job(
+        job_id          = job_dir.name,
+        status          = status,
+        progress        = 100 if status in ("done", "preview_done") else 0,
+        message         = f"Cargado desde disco ({len(images)} fotos)",
+        received_frames = set(range(len(images))),
+        total_frames    = len(images),
+        output_path     = out_path,
+        sparse_ply      = str(ply) if ply.exists() else None,
+        created_at      = job_dir.stat().st_mtime,
+    )
+
+
+def _load_existing_jobs(scan_dir: pathlib.Path = None):
+    """Escanea scan_dir (o WORK_ROOT) y carga los jobs que haya en disco."""
+    root = scan_dir or WORK_ROOT
+    if not root.exists():
+        return
+    loaded = 0
+    for job_dir in root.iterdir():
         if not job_dir.is_dir():
             continue
         jid = job_dir.name
-        images = list((job_dir / "images").glob("*.jpg")) if (job_dir / "images").exists() else []
-        if not images:
-            continue
-        # Determinar estado
-        mesh = job_dir / "output" / "mesh.obj"
-        ply  = job_dir / "output" / "sparse.ply"
-        imu  = job_dir / "imu_summary.json"
-        if mesh.exists():
-            status = "done"
-            out_path = str(mesh)
-        elif ply.exists():
-            status = "preview_done"
-            out_path = None
-        elif imu.exists():
-            status = "uploading"
-            out_path = None
-        else:
-            status = "waiting"
-            out_path = None
-
-        job = Job(
-            job_id         = jid,
-            status         = status,
-            progress       = 100 if status in ("done", "preview_done") else 0,
-            message        = f"Cargado desde disco ({len(images)} fotos)",
-            received_frames= set(range(len(images))),
-            total_frames   = len(images),
-            output_path    = out_path,
-            sparse_ply     = str(ply) if ply.exists() else None,
-            created_at     = job_dir.stat().st_mtime,
-        )
         with _lock:
-            _jobs[jid] = job
-        log.info(f"Loaded existing job {jid} ({status}, {len(images)} frames)")
+            if jid in _jobs:   # ya cargado
+                continue
+        job = _load_job_from_dir(job_dir)
+        if job:
+            with _lock:
+                _jobs[jid] = job
+            log.info(f"Loaded job {jid} ({job.status}, {job.total_frames} frames)")
+            loaded += 1
+    if loaded:
+        log.info(f"Loaded {loaded} existing jobs from {root}")
 
 
 def _job(job_id: str) -> Optional[Job]:
@@ -392,39 +404,80 @@ def list_jobs():
 
 @app.post("/import_folder")
 def import_folder():
-    """Importar una carpeta existente con imágenes como nuevo job."""
+    """Importar una carpeta con imágenes (o subcarpetas de jobs) como nuevos trabajos."""
+    import shutil
     data   = request.get_json(silent=True) or {}
     folder = data.get("folder", "")
     if not folder:
         return jsonify({"error": "folder requerido"}), 400
 
-    img_dir = pathlib.Path(folder)
-    # Aceptar si la carpeta tiene JPEGs o es una carpeta images/ dentro de un job
-    if (img_dir / "images").exists():
-        img_dir = img_dir / "images"
+    root = pathlib.Path(folder)
+    if not root.exists():
+        return jsonify({"error": f"Carpeta no encontrada: {folder}"}), 400
 
-    images = sorted(img_dir.glob("*.jpg"))
-    if not images:
-        return jsonify({"error": f"No se encontraron imágenes en {folder}"}), 400
+    imported = []
 
-    import shutil
-    job = _new_job()
-    jid = job.job_id
-    dst = WORK_ROOT / jid / "images"
-    dst.mkdir(parents=True, exist_ok=True)
+    # Caso 1: la carpeta ya tiene estructura de job (tiene images/ o JPEGs directos)
+    direct_images = list(root.glob("*.jpg"))
+    has_images_subdir = (root / "images").exists() and list((root / "images").glob("*.jpg"))
 
-    # Copiar o enlazar imágenes al directorio del job
-    for i, img in enumerate(images):
-        shutil.copy2(str(img), str(dst / f"{i:05d}.jpg"))
+    if direct_images or has_images_subdir:
+        img_src = root / "images" if has_images_subdir else root
+        images  = sorted(img_src.glob("*.jpg"))
+        job = _new_job()
+        jid = job.job_id
+        dst = WORK_ROOT / jid / "images"
+        dst.mkdir(parents=True, exist_ok=True)
+        for i, img in enumerate(images):
+            shutil.copy2(str(img), str(dst / f"{i:05d}.jpg"))
+        with _lock:
+            job.received_frames = set(range(len(images)))
+            job.total_frames    = len(images)
+            job.status          = "uploading"
+            job.message         = f"Importado desde {root.name} ({len(images)} fotos)"
+        imported.append({"job_id": jid, "frames": len(images)})
+        log.info(f"Imported {len(images)} images from {folder} → job {jid}")
 
-    with _lock:
-        job.received_frames = set(range(len(images)))
-        job.total_frames    = len(images)
-        job.status          = "uploading"
-        job.message         = f"Importado desde {pathlib.Path(folder).name} ({len(images)} fotos)"
+    else:
+        # Caso 2: la carpeta contiene subcarpetas, cada una es un job
+        for sub in sorted(root.iterdir()):
+            if not sub.is_dir():
+                continue
+            sub_images = list(sub.glob("*.jpg"))
+            img_sub    = sub / "images"
+            if not sub_images and img_sub.exists():
+                sub_images = list(img_sub.glob("*.jpg"))
+            if not sub_images:
+                continue
+            img_src = img_sub if img_sub.exists() else sub
 
-    log.info(f"Imported {len(images)} images from {folder} → job {jid}")
-    return jsonify({"job_id": jid, "frames": len(images)})
+            # Si ya existe un job con ese nombre, cargarlo en lugar de copiar
+            existing = _load_job_from_dir(sub)
+            if existing:
+                with _lock:
+                    _jobs[existing.job_id] = existing
+                imported.append({"job_id": existing.job_id, "frames": existing.total_frames})
+                log.info(f"Loaded sub-job {existing.job_id} from {sub}")
+            else:
+                job = _new_job()
+                jid = job.job_id
+                dst = WORK_ROOT / jid / "images"
+                dst.mkdir(parents=True, exist_ok=True)
+                for i, img in enumerate(sorted(sub_images)):
+                    shutil.copy2(str(img), str(dst / f"{i:05d}.jpg"))
+                with _lock:
+                    job.received_frames = set(range(len(sub_images)))
+                    job.total_frames    = len(sub_images)
+                    job.status          = "uploading"
+                    job.message         = f"Importado desde {sub.name} ({len(sub_images)} fotos)"
+                imported.append({"job_id": jid, "frames": len(sub_images)})
+                log.info(f"Imported {len(sub_images)} images from {sub} → job {jid}")
+
+    if not imported:
+        return jsonify({"error": "No se encontraron imágenes en la carpeta seleccionada"}), 400
+
+    return jsonify({"imported": imported, "count": len(imported),
+                    "job_id": imported[0]["job_id"], "frames": imported[0]["frames"]})
 
 
 # ── reconstruction workers ────────────────────────────────────────────────────
