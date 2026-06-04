@@ -149,10 +149,17 @@ class JobsPanel(QWidget):
         hdr.addWidget(self._btn_refresh)
         lay.addLayout(hdr)
 
-        btn_import = QPushButton("📁 Importar escaneo (.refscan o carpeta)…")
-        btn_import.setToolTip("Importar imágenes de una carpeta existente como nuevo trabajo")
-        btn_import.clicked.connect(self._browse_folder)
-        lay.addWidget(btn_import)
+        btns = QHBoxLayout()
+        btn_folder = QPushButton("📁 Carpeta de fotos")
+        btn_folder.setToolTip("Importar carpeta con fotos crudas del celular")
+        btn_folder.clicked.connect(self._browse_raw_folder)
+        btns.addWidget(btn_folder)
+
+        btn_refscan = QPushButton("📄 Abrir .refscan")
+        btn_refscan.setToolTip("Importar archivo .refscan exportado anteriormente")
+        btn_refscan.clicked.connect(self._browse_refscan)
+        btns.addWidget(btn_refscan)
+        lay.addLayout(btns)
 
         self._lbl_server = QLabel("Sin servidor")
         self._lbl_server.setStyleSheet("color:#888; font-size:10px;")
@@ -184,10 +191,14 @@ class JobsPanel(QWidget):
         self._lbl_server.setText(f"📡 {ip}:5005")
         self._fetch_jobs()
 
+    def _effective_ip(self) -> str:
+        """IP del servidor — usa localhost si no se configuró una IP externa."""
+        return self._server_ip or "127.0.0.1"
+
     def _fetch_jobs(self):
-        if not _HAS_REQUESTS or not self._server_ip:
+        if not _HAS_REQUESTS:
             return
-        ip = self._server_ip
+        ip = self._effective_ip()
         threading.Thread(target=self._do_fetch, args=(ip,), daemon=True).start()
 
     def _do_fetch(self, ip: str):
@@ -234,9 +245,9 @@ class JobsPanel(QWidget):
                 card.deleteLater()
 
     def _on_regenerate(self, job_id: str):
-        if not _HAS_REQUESTS or not self._server_ip:
+        if not _HAS_REQUESTS:
             return
-        ip = self._server_ip
+        ip = self._effective_ip()
         self._lbl_status.setText(f"Regenerando {job_id}…")
         threading.Thread(
             target=self._do_regenerate, args=(ip, job_id), daemon=True
@@ -262,30 +273,27 @@ class JobsPanel(QWidget):
                                      Qt.QueuedConnection,
                                      Q_ARG(str, f"Error: {e}"))
 
-    def _browse_folder(self):
-        # Permite seleccionar carpeta con fotos O archivo .refscan
+    def _browse_raw_folder(self):
+        path = QFileDialog.getExistingDirectory(
+            self, "Seleccionar carpeta con fotos", self._browse_root,
+        )
+        if not path:
+            return
+        self._lbl_status.setText(f"Importando {pathlib.Path(path).name}…")
+        threading.Thread(target=self._do_import,
+                         args=(self._effective_ip(), path), daemon=True).start()
+
+    def _browse_refscan(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Seleccionar escaneo",
+            self, "Abrir archivo .refscan",
             self._browse_root,
             "Escaneos (*.refscan);;Todos los archivos (*)",
         )
         if not path:
-            # Fallback: seleccionar carpeta
-            path = QFileDialog.getExistingDirectory(
-                self, "Seleccionar carpeta con fotos", self._browse_root,
-            )
-        if not path:
-            return
-        if not self._server_ip:
-            self._lbl_status.setText("Sin servidor — reiniciá la app")
             return
         self._lbl_status.setText(f"Importando {pathlib.Path(path).name}…")
-        ip = self._server_ip
-        is_refscan = path.endswith(".refscan")
-        threading.Thread(
-            target=self._do_import_refscan if is_refscan else self._do_import,
-            args=(ip, path), daemon=True
-        ).start()
+        threading.Thread(target=self._do_import_refscan,
+                         args=(self._effective_ip(), path), daemon=True).start()
 
     def _do_import(self, ip: str, folder: str):
         try:
@@ -320,7 +328,7 @@ class JobsPanel(QWidget):
             QMetaObject.invokeMethod(self, "_set_status", Qt.QueuedConnection, Q_ARG(str, f"Error: {e}"))
 
     def _on_export(self, job_id: str):
-        if not self._server_ip:
+        if not _HAS_REQUESTS:
             return
         dest, _ = QFileDialog.getSaveFileName(
             self, "Guardar escaneo como…",
@@ -330,8 +338,8 @@ class JobsPanel(QWidget):
         if not dest:
             return
         self._lbl_status.setText(f"Exportando {job_id}…")
-        ip = self._server_ip
-        threading.Thread(target=self._do_export, args=(ip, job_id, dest), daemon=True).start()
+        threading.Thread(target=self._do_export,
+                         args=(self._effective_ip(), job_id, dest), daemon=True).start()
 
     def _do_export(self, ip: str, job_id: str, dest: str):
         try:
