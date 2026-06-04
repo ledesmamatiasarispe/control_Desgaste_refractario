@@ -42,7 +42,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:layout_marginEnd="8dp"
-            android:text="📷 Más fotos"
+            android:text="📷 Agregar fotos"
             style="@style/Widget.AppCompat.Button.Borderless" />
 
         <Button
