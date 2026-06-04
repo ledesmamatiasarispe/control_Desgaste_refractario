@@ -3,6 +3,7 @@ package com.refractoryanalyzer
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.graphics.ImageFormat
 import android.graphics.Rect
@@ -423,12 +424,20 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
     private fun toggleFlash() {
         try {
             val cm = requireContext().getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            val cameraId = cm.cameraIdList.firstOrNull() ?: return
+            val cameraId = cm.cameraIdList.firstOrNull { id ->
+                val chars = cm.getCameraCharacteristics(id)
+                chars.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK &&
+                chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+            } ?: run {
+                Toast.makeText(context, "Flash no disponible", Toast.LENGTH_SHORT).show()
+                return
+            }
             isFlashOn = !isFlashOn
             cm.setTorchMode(cameraId, isFlashOn)
             binding.btnFlash.text = if (isFlashOn) "🔦 ON" else "🔦"
         } catch (e: Exception) {
             Log.e("CaptureFragment", "Flash error: $e")
+            Toast.makeText(context, "Error al controlar flash", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -586,7 +595,12 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
         if (isFlashOn) {
             try {
                 val cm = requireContext().getSystemService(Context.CAMERA_SERVICE) as CameraManager
-                cm.setTorchMode(cm.cameraIdList.first(), false)
+                val cameraId = cm.cameraIdList.firstOrNull { id ->
+                    val chars = cm.getCameraCharacteristics(id)
+                    chars.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK &&
+                    chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+                }
+                if (cameraId != null) cm.setTorchMode(cameraId, false)
                 isFlashOn = false
             } catch (_: Exception) {}
         }
