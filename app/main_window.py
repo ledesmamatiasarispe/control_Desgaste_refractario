@@ -8,13 +8,14 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QStatusBar, QToolBar, QMessageBox, QLabel, QSplitter,
     QGroupBox, QFormLayout, QComboBox, QSlider, QFrame,
-    QFileDialog, QInputDialog, QPushButton, QMenu,
+    QFileDialog, QInputDialog, QPushButton, QMenu, QTabWidget,
 )
 from PySide6.QtGui import QAction, QFont, QColor
 from PySide6.QtCore import QSize
 
 from app.gl_widget  import GLWidget, Mode
 from ui.panel       import CampaignPanel
+from ui.jobs_panel  import JobsPanel
 from core.loader    import MeshData, load_file
 from core.heatmap   import COLORMAPS
 from core.project   import (save_project, load_project, get_recent,
@@ -100,13 +101,21 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Left panel
+        # Left panel — QTabWidget con Escaneos y Trabajos
         self._panel = CampaignPanel()
         self._panel.load_requested.connect(self._on_load_requested)
         self._panel.select_requested.connect(self._on_select)
         self._panel.remove_requested.connect(self._on_remove)
         self._panel.compare_requested.connect(self._on_compare)
-        root.addWidget(self._panel)
+
+        self._jobs_panel = JobsPanel()
+        self._jobs_panel.mesh_ready.connect(self._on_load_requested)
+
+        left_tabs = QTabWidget()
+        left_tabs.setFixedWidth(240)
+        left_tabs.addTab(self._panel,      "Escaneos")
+        left_tabs.addTab(self._jobs_panel, "Trabajos")
+        root.addWidget(left_tabs)
 
         # GL viewer
         self._gl = GLWidget()
@@ -1270,7 +1279,6 @@ class MainWindow(QMainWindow):
     def _update_server_status(self):
         import socket
         try:
-            # Get the LAN IP (not loopback)
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
@@ -1278,6 +1286,7 @@ class MainWindow(QMainWindow):
         except Exception:
             ip = "127.0.0.1"
         self._server_lbl.setText(f"📡  {ip}:5005")
+        self._jobs_panel.set_server_ip(ip)
 
     def _on_server_mesh_ready(self, path: str, name: str):
         """Called from Flask thread when reconstruction finishes — dispatch to Qt thread."""
