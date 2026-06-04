@@ -79,6 +79,16 @@ class ProgressFragment : Fragment() {
 
     private suspend fun processWorkflow() {
         val serverIp = args.serverIp
+
+        // Si venimos del visor de nube (continue_reconstruct ya fue llamado), solo pollear
+        val existing = args.existingJobId
+        if (existing.isNotEmpty()) {
+            jobId = existing
+            updateStatus("Esperando reconstrucción completa…", 60)
+            pollStatus(serverIp, existing)
+            return
+        }
+
         val frames = FrameStore.frames
         if (frames.isEmpty()) {
             showError("No hay fotos para procesar")

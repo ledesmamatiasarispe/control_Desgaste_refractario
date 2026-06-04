@@ -12,6 +12,8 @@ import androidx.fragment.app.Fragment
 import androidx.navigation.fragment.findNavController
 import androidx.navigation.fragment.navArgs
 import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -141,7 +143,7 @@ class PointCloudViewerFragment : Fragment() {
         statusTxt.text          = "Iniciando reconstrucción completa…"
 
         val url  = "http://${args.serverIp}:5005/continue_reconstruct/${args.jobId}"
-        val body = RequestBody.create(MediaType.parse("application/json"), "{}")
+        val body = "{}".toRequestBody("application/json".toMediaType())
         client.newCall(Request.Builder().url(url).post(body).build()).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 requireActivity().runOnUiThread {
@@ -150,10 +152,9 @@ class PointCloudViewerFragment : Fragment() {
                 }
             }
             override fun onResponse(call: Call, response: Response) {
-                // Navigate to progress fragment for polling
                 requireActivity().runOnUiThread {
                     val action = PointCloudViewerFragmentDirections
-                        .actionPointCloudToProgress(args.serverIp, args.jobId)
+                        .actionPointCloudToProgress(args.serverIp, args.jobId, 0, IntArray(0), args.jobId)
                     findNavController().navigate(action)
                 }
             }
@@ -163,35 +164,33 @@ class PointCloudViewerFragment : Fragment() {
     // ── PLY parser ────────────────────────────────────────────────────────────
 
     private fun parsePly(data: ByteArray): FloatArray {
-        val text   = String(data, Charsets.US_ASCII)
-        val header = text.substringBefore("end_header") + "end_header"
-        val headerEnd = data.indexOf("end_header\n".toByteArray())
+        val text      = String(data, Charsets.US_ASCII)
+        val endMarker = "end_header\n"
+        val headerEnd = text.indexOf(endMarker)
         if (headerEnd < 0) return FloatArray(0)
-        val dataStart = headerEnd + "end_header\n".length
 
-        // Count vertices from header
+        val header      = text.substring(0, headerEnd)
         val vertexCount = Regex("element vertex (\\d+)").find(header)
             ?.groupValues?.get(1)?.toIntOrNull() ?: return FloatArray(0)
 
-        val result = FloatArray(vertexCount * 6)  // x,y,z,r,g,b
-        var idx = 0
+        val result = FloatArray(vertexCount * 6)
+        var idx    = 0
 
-        // ASCII PLY — one vertex per line after header
-        val lines = text.substring(dataStart + if (dataStart < text.length) 0 else 0)
+        text.substring(headerEnd + endMarker.length)
             .lineSequence()
             .filter { it.isNotBlank() }
             .take(vertexCount)
-
-        for (line in lines) {
-            val parts = line.trim().split(" ")
-            if (parts.size < 6) continue
-            result[idx++] = parts[0].toFloatOrNull() ?: 0f
-            result[idx++] = parts[1].toFloatOrNull() ?: 0f
-            result[idx++] = parts[2].toFloatOrNull() ?: 0f
-            result[idx++] = (parts[3].toIntOrNull() ?: 128) / 255f
-            result[idx++] = (parts[4].toIntOrNull() ?: 128) / 255f
-            result[idx++] = (parts[5].toIntOrNull() ?: 128) / 255f
-        }
+            .forEach { line ->
+                val parts = line.trim().split(" ")
+                if (parts.size >= 6) {
+                    result[idx++] = parts[0].toFloatOrNull() ?: 0f
+                    result[idx++] = parts[1].toFloatOrNull() ?: 0f
+                    result[idx++] = parts[2].toFloatOrNull() ?: 0f
+                    result[idx++] = (parts[3].toIntOrNull() ?: 128) / 255f
+                    result[idx++] = (parts[4].toIntOrNull() ?: 128) / 255f
+                    result[idx++] = (parts[5].toIntOrNull() ?: 128) / 255f
+                }
+            }
         return result.copyOf(idx)
     }
 
