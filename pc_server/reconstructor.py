@@ -179,8 +179,13 @@ def _export_sparse_ply(recon, ply_path: str):
     ]
     for p in pts:
         x, y, z = p.xyz
-        r, g, b = p.color[:3]
-        lines.append(f"{x:.6f} {y:.6f} {z:.6f} {int(r)} {int(g)} {int(b)}")
+        c = p.color[:3]
+        # pycolmap puede devolver uint8 (0-255) o float (0-1)
+        if hasattr(c, 'dtype') and np.issubdtype(c.dtype, np.floating):
+            r, g, b = int(c[0]*255), int(c[1]*255), int(c[2]*255)
+        else:
+            r, g, b = int(c[0]), int(c[1]), int(c[2])
+        lines.append(f"{x:.6f} {y:.6f} {z:.6f} {r} {g} {b}")
     pathlib.Path(ply_path).write_text("\n".join(lines))
 
 

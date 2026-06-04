@@ -299,6 +299,20 @@ class PointCloudRenderer : GLSurfaceView.Renderer {
             rgb[i * 3 + 2] = data[i * 6 + 5]
         }
 
+        // Si todos los colores son cero (pycolmap no los populó), usar gradiente por altura
+        val allBlack = rgb.none { it > 0.01f }
+        if (allBlack) {
+            val minY = xyz.filterIndexed { i, _ -> i % 3 == 1 }.minOrNull() ?: 0f
+            val maxY = xyz.filterIndexed { i, _ -> i % 3 == 1 }.maxOrNull() ?: 1f
+            val rangeY = (maxY - minY).coerceAtLeast(0.001f)
+            for (i in 0 until pointCount) {
+                val t = (xyz[i * 3 + 1] - minY) / rangeY   // 0=bottom, 1=top
+                rgb[i * 3]     = 0.2f + 0.6f * t            // R: azul→naranja
+                rgb[i * 3 + 1] = 0.4f + 0.3f * t            // G
+                rgb[i * 3 + 2] = 0.9f - 0.7f * t            // B
+            }
+        }
+
         vertexBuf = ByteBuffer.allocateDirect(xyz.size * 4)
             .order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(xyz); position(0) }
         colorBuf  = ByteBuffer.allocateDirect(rgb.size * 4)

@@ -422,22 +422,37 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
     // ── streaming upload ──────────────────────────────────────────────────────
 
     private fun toggleFlash() {
-        try {
-            val cm = requireContext().getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            val cameraId = cm.cameraIdList.firstOrNull { id ->
-                val chars = cm.getCameraCharacteristics(id)
-                chars.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK &&
-                chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
-            } ?: run {
-                Toast.makeText(context, "Flash no disponible", Toast.LENGTH_SHORT).show()
-                return
+        val cm = requireContext().getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val cameraId = cm.cameraIdList.firstOrNull { id ->
+            val chars = cm.getCameraCharacteristics(id)
+            chars.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK &&
+            chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+        } ?: run {
+            Toast.makeText(context, "Flash no disponible en este dispositivo", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        isFlashOn = !isFlashOn
+
+        // ARCore tiene control exclusivo de la cámara — pausar brevemente para poder
+        // usar el torch via CameraManager y luego retomar
+        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.Main) {
+            try {
+                arSession?.pause()
+                binding.surfaceView.onPause()
+                withContext(Dispatchers.IO) {
+                    Thread.sleep(150)
+                    cm.setTorchMode(cameraId, isFlashOn)
+                    Thread.sleep(150)
+                }
+                arSession?.resume()
+                binding.surfaceView.onResume()
+                binding.btnFlash.text = if (isFlashOn) "🔦 ON" else "🔦"
+            } catch (e: Exception) {
+                Log.e("CaptureFragment", "Flash error: $e")
+                isFlashOn = !isFlashOn   // revertir
+                Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
-            isFlashOn = !isFlashOn
-            cm.setTorchMode(cameraId, isFlashOn)
-            binding.btnFlash.text = if (isFlashOn) "🔦 ON" else "🔦"
-        } catch (e: Exception) {
-            Log.e("CaptureFragment", "Flash error: $e")
-            Toast.makeText(context, "Error al controlar flash", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -601,8 +616,8 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
                     chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
                 }
                 if (cameraId != null) cm.setTorchMode(cameraId, false)
-                isFlashOn = false
             } catch (_: Exception) {}
+            isFlashOn = false
         }
     }
 
