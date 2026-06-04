@@ -92,12 +92,16 @@ def reconstruct_sparse(
         height = imu_data.get("height", 1080)
         reader_opts.default_focal_length_factor = focal_px / max(width, height)
 
-    progress_cb(10, "Extrayendo características SIFT…")
+    progress_cb(8, "Seleccionando mejores fotos…")
+    all_jpgs  = sorted([f.name for f in img_path.glob("*.jpg")])
+    jpg_names = _select_best_frames(img_path, all_jpgs, imu_data, max_frames=200)
+    log.info(f"Frame selection: {len(all_jpgs)} → {len(jpg_names)} frames")
+
+    progress_cb(12, "Extrayendo características SIFT…")
     extraction_opts = pycolmap.FeatureExtractionOptions()
-    extraction_opts.sift.max_num_features = 16384   # más features para superficies oscuras
-    extraction_opts.max_image_size        = 3200    # mayor resolución = más detalle
+    extraction_opts.sift.max_num_features = 16384
+    extraction_opts.max_image_size        = 3200
     extraction_opts.num_threads           = 2
-    jpg_names = sorted([f.name for f in img_path.glob("*.jpg")])
     pycolmap.extract_features(
         db_path, img_path,
         image_names=jpg_names,
@@ -185,6 +189,93 @@ def reconstruct_dense(
     return obj_path
 
 
+def _select_best_frames(
+    img_path: pathlib.Path,
+    jpg_names: list,
+    imu_data: dict,
+    max_frames: int = 200,
+) -> list:
+    """
+    Elige las mejores fotos de entre todas las capturadas:
+    1. Filtra fotos movidas (gyro alto en IMU)
+    2. Ordena por nitidez (varianza del Laplaciano)
+    3. Selecciona hasta max_frames con máxima cobertura angular
+    """
+    if len(jpg_names) <= max_frames:
+        return jpg_names   # ya son pocas, usar todas
+
+    # Construir índice de datos IMU por frame_id
+    frames_meta = {f.get("frame_id"): f for f in imu_data.get("frames", [])}
+    GYRO_MAX = 0.8   # rad/s — descartar frames muy movidos
+
+    # Calcular nitidez con PIL + numpy (sin cv2)
+    def sharpness(img_file: pathlib.Path) -> float:
+        try:
+            from PIL import Image as PILImage
+            img = PILImage.open(img_file).convert("L")
+            # Reducir para velocidad
+            img = img.resize((320, 240), PILImage.BILINEAR)
+            arr = np.array(img, dtype=np.float32)
+            # Laplaciano manual
+            lap = (arr[:-2, 1:-1] + arr[2:, 1:-1] + arr[1:-1, :-2] + arr[1:-1, 2:]
+                   - 4 * arr[1:-1, 1:-1])
+            return float(lap.var())
+        except Exception:
+            return 0.0
+
+    scored = []
+    for name in jpg_names:
+        # Frame ID desde nombre de archivo (e.g. "00042.jpg" → 42)
+        try:
+            fid = int(pathlib.Path(name).stem)
+        except ValueError:
+            fid = -1
+
+        meta  = frames_meta.get(fid, {})
+        imu   = meta.get("imu", {})
+        gyro  = imu.get("gyro", [0, 0, 0])
+        gyro_mag = float(np.sqrt(sum(g*g for g in gyro))) if gyro else 0.0
+
+        if gyro_mag > GYRO_MAX:
+            continue   # descartado por movimiento
+
+        sharp = sharpness(img_path / name)
+        orient = imu.get("orient", [0.0, 0.0, 0.0])
+        scored.append((name, sharp, orient))
+
+    if not scored:
+        log.warning("All frames filtered by gyro — using all frames")
+        return jpg_names
+
+    # Si aún sobran, seleccionar con máxima cobertura angular
+    if len(scored) <= max_frames:
+        return [s[0] for s in scored]
+
+    # Ordenar por nitidez descendente, tomar el top 2×max y luego filtrar por cobertura
+    scored.sort(key=lambda x: x[1], reverse=True)
+    candidates = scored[:max_frames * 2]
+
+    # Greedy: elegir frames que maximicen la distancia angular al más cercano ya elegido
+    selected = [candidates[0]]
+    remaining = candidates[1:]
+    while len(selected) < max_frames and remaining:
+        best_idx, best_dist = 0, -1.0
+        for i, (name, sharp, orient) in enumerate(remaining):
+            # Distancia mínima al frame más cercano ya seleccionado
+            min_d = min(
+                abs(orient[0] - s[2][0]) + abs(orient[1] - s[2][1])
+                for s in selected
+            )
+            score = min_d + sharp * 0.001   # ponderar levemente por nitidez
+            if score > best_dist:
+                best_dist, best_idx = score, i
+        selected.append(remaining.pop(best_idx))
+
+    result = sorted([s[0] for s in selected])
+    log.info(f"Selected {len(result)} frames (gyro-filtered: {len(scored)}, sharpness+coverage)")
+    return result
+
+
 def _smooth_and_fill(mesh):
     """Suavizar la malla y rellenar huecos pequeños."""
     import trimesh.smoothing
@@ -264,12 +355,16 @@ def _reconstruct_colmap(
         log.info(f"Using focal prior: {focal_px:.1f} px")
 
     # ── 2. Feature extraction ──
-    cb(10, "Extrayendo características SIFT…")
+    cb(8, "Seleccionando mejores fotos…")
+    all_jpgs  = sorted([f.name for f in image_path.glob("*.jpg")])
+    jpg_names = _select_best_frames(image_path, all_jpgs, imu_data, max_frames=200)
+    log.info(f"Frame selection: {len(all_jpgs)} → {len(jpg_names)} frames")
+
+    cb(12, "Extrayendo características SIFT…")
     extraction_opts = pycolmap.FeatureExtractionOptions()
     extraction_opts.sift.max_num_features = 16384
     extraction_opts.max_image_size        = 3200
     extraction_opts.num_threads           = 2
-    jpg_names = sorted([f.name for f in image_path.glob("*.jpg")])
     pycolmap.extract_features(
         db_path, image_path,
         image_names=jpg_names,

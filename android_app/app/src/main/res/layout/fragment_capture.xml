@@ -57,7 +57,7 @@
 
     <ProgressBar android:id="@+id/progress_bar" style="?android:progressBarStyleHorizontal"
         android:layout_width="match_parent" android:layout_height="6dp"
-        android:max="120" android:progress="0"/>
+        android:max="100" android:progress="0"/>
 
     <!-- Controls -->
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"

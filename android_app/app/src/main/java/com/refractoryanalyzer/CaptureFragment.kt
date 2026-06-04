@@ -89,9 +89,9 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
     private var lastRotationMatrix = FloatArray(9).apply { this[0]=1f; this[4]=1f; this[8]=1f }
 
     companion object {
-        const val TARGET_FRAMES = 120
-        const val INTERVAL_MS   = 150L
-        const val GYRO_MAX      = 1.2f
+        const val MIN_FRAMES  = 30     // mínimo para habilitar "Ver nube"
+        const val INTERVAL_MS = 150L
+        const val GYRO_MAX    = 1.2f
     }
 
     private var lastAccel = FloatArray(3)
@@ -242,14 +242,14 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
         isCapturing = true
         binding.btnCapture.text = getString(R.string.btn_detener)
         captureJob = viewLifecycleOwner.lifecycleScope.launch {
-            while (isCapturing && capturedFrames.size < TARGET_FRAMES) {
+            while (isCapturing) {
                 if (gyroMag < GYRO_MAX) {
                     updateStabilityIndicator(true)
                     takePhoto()
                 } else updateStabilityIndicator(false)
                 delay(INTERVAL_MS)
             }
-            if (capturedFrames.size >= TARGET_FRAMES) stopAutoCapture()
+            // Sin límite — el usuario decide cuándo parar
         }
     }
 
@@ -433,10 +433,10 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
 
     private fun updateUI() {
         val count = capturedFrames.size
-        binding.tvCounter.text = getString(R.string.fotos_counter, count, TARGET_FRAMES)
-        binding.progressBar.progress = count
-        binding.btnSend.isEnabled = count >= 30
-        binding.btnSend.text = getString(R.string.btn_enviar, count)
+        binding.tvCounter.text = "$count fotos"
+        binding.progressBar.progress = if (count >= MIN_FRAMES) 100 else count * 100 / MIN_FRAMES
+        binding.btnSend.isEnabled = count >= MIN_FRAMES
+        binding.btnSend.text = "Ver nube ($count)"
         if (!args.isAutomatic && !isCapturing) binding.btnCapture.text = getString(R.string.btn_capturar)
     }
 
