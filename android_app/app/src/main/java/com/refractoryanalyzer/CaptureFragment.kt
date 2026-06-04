@@ -3,6 +3,7 @@ package com.refractoryanalyzer
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraManager
 import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.YuvImage
@@ -72,6 +73,7 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
     private var installRequested = false
     private var lastArPose: Pose? = null
     
+    private var isFlashOn = false
     private var isCapturing = false
     private var isTakingPhoto = false
     private var captureJob: Job? = null
@@ -198,6 +200,7 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
         }
         binding.btnCyl.setOnClickListener { markCylinderPoint() }
         binding.btnAlign.setOnClickListener { markAlignPoint() }
+        binding.btnFlash.setOnClickListener { toggleFlash() }
 
         updateUI()
         updateAlignButtonText()
@@ -417,6 +420,18 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
 
     // ── streaming upload ──────────────────────────────────────────────────────
 
+    private fun toggleFlash() {
+        try {
+            val cm = requireContext().getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val cameraId = cm.cameraIdList.firstOrNull() ?: return
+            isFlashOn = !isFlashOn
+            cm.setTorchMode(cameraId, isFlashOn)
+            binding.btnFlash.text = if (isFlashOn) "🔦 ON" else "🔦"
+        } catch (e: Exception) {
+            Log.e("CaptureFragment", "Flash error: $e")
+        }
+    }
+
     private fun fetchJobStatus(ip: String, jid: String): String {
         return try {
             httpClient.newCall(
@@ -568,6 +583,13 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
         arSession?.pause()
         sensorManager.unregisterListener(this)
         stopAutoCapture()
+        if (isFlashOn) {
+            try {
+                val cm = requireContext().getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                cm.setTorchMode(cm.cameraIdList.first(), false)
+                isFlashOn = false
+            } catch (_: Exception) {}
+        }
     }
 
     override fun onSensorChanged(event: SensorEvent) {
