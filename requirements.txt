@@ -4,3 +4,6 @@ numpy>=1.24
 scipy>=1.10
 matplotlib>=3.7
 PyOpenGL>=3.1
+flask>=3.0
+requests>=2.31
+pycolmap>=3.0

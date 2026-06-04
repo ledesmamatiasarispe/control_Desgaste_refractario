@@ -200,52 +200,75 @@ def _poisson_mesh(dense_path: pathlib.Path, out_path: pathlib.Path,
 
 
 def _mesh_from_sparse(recon, out_path: pathlib.Path, cb: Callable) -> str:
-    """Convert sparse point cloud → surface mesh (alpha shape, better than convex hull)."""
+    """Convert sparse point cloud → surface mesh using alpha shapes (CPU, no GPU needed)."""
     import trimesh
+    from scipy.spatial import Delaunay
 
-    cb(80, "Generando malla desde nube dispersa…")
+    cb(80, "Generando malla desde nube dispersa (alpha shape)…")
 
-    pts = np.array([p.xyz for p in recon.points3D.values()], dtype=np.float32)
+    pts = np.array([p.xyz for p in recon.points3D.values()], dtype=np.float64)
     if len(pts) < 10:
         raise RuntimeError("Muy pocos puntos en la nube dispersa.")
 
     log.info(f"Sparse cloud: {len(pts)} points")
     obj_path = str(out_path / "mesh.obj")
 
-    # Try Open3D Ball-Pivoting (best quality for sparse clouds)
+    # Compute adaptive alpha from average nearest-neighbor distance
     try:
-        import open3d as o3d
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
-        pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(
-            radius=0.05, max_nn=30))
-        # Adaptive radii based on point cloud density
-        dists = pcd.compute_nearest_neighbor_distance()
-        avg_d = float(np.mean(dists))
-        radii = [avg_d * r for r in (1.5, 3.0, 6.0)]
-        mesh_o3d = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-            pcd, o3d.utility.DoubleVector(radii))
-        if len(mesh_o3d.triangles) > 0:
-            cb(92, f"Exportando malla BPA ({len(mesh_o3d.triangles):,} caras)…")
-            o3d.io.write_triangle_mesh(obj_path, mesh_o3d)
-            return obj_path
-    except ImportError:
-        pass   # Open3D not installed — fall through to trimesh
+        from scipy.spatial import KDTree
+        tree = KDTree(pts)
+        dists, _ = tree.query(pts, k=2)
+        avg_nn = float(np.median(dists[:, 1]))
+        alpha  = avg_nn * 8.0   # generous radius to connect sparse points
+        log.info(f"Alpha shape: avg_nn={avg_nn:.4f}, alpha={alpha:.4f}")
 
-    # Fallback: Poisson reconstruction via trimesh (better than convex hull)
-    cb(85, "Reconstrucción Poisson desde nube dispersa…")
-    pc = trimesh.PointCloud(pts)
-    # Estimate normals pointing outward (assume centroid-centered furnace)
-    centroid = pts.mean(axis=0)
-    normals  = pts - centroid
-    norms    = np.linalg.norm(normals, axis=1, keepdims=True)
-    normals  = normals / (norms + 1e-8)
+        # 3D Delaunay → filter tetrahedra by circumradius < alpha → extract surface
+        tri = Delaunay(pts)
+        tetra = pts[tri.simplices]   # (N, 4, 3)
 
-    try:
-        mesh = trimesh.voxel.ops.points_to_marching_cubes(pts, pitch=0.02)
-    except Exception:
-        mesh = trimesh.PointCloud(pts).convex_hull   # last resort
+        # Circumradius of each tetrahedron
+        def _circumradius(t):
+            a, b, c, d = t
+            A = np.array([b-a, c-a, d-a])
+            b_ = 0.5 * np.array([np.dot(b-a, b-a),
+                                  np.dot(c-a, c-a),
+                                  np.dot(d-a, d-a)])
+            try:
+                x = np.linalg.solve(A, b_)
+                return np.linalg.norm(x)
+            except np.linalg.LinAlgError:
+                return np.inf
 
+        radii  = np.array([_circumradius(t) for t in tetra])
+        keep   = tri.simplices[radii < alpha]
+
+        if len(keep) > 0:
+            # Extract boundary faces (appear exactly once across all tetrahedra)
+            from collections import Counter
+            face_count = Counter()
+            for tet in keep:
+                for face in [(tet[0],tet[1],tet[2]),
+                             (tet[0],tet[1],tet[3]),
+                             (tet[0],tet[2],tet[3]),
+                             (tet[1],tet[2],tet[3])]:
+                    face_count[tuple(sorted(face))] += 1
+            boundary = [f for f, c in face_count.items() if c == 1]
+
+            if len(boundary) > 0:
+                faces = np.array(boundary, dtype=np.int64)
+                mesh  = trimesh.Trimesh(vertices=pts, faces=faces, process=True)
+                mesh  = mesh.as_open3d if False else mesh   # keep as trimesh
+                if len(mesh.faces) > 0:
+                    cb(92, f"Exportando alpha shape ({len(mesh.faces):,} caras)…")
+                    mesh.export(obj_path)
+                    return obj_path
+
+    except Exception as e:
+        log.warning(f"Alpha shape failed: {e} — using convex hull")
+
+    # Last resort: convex hull (at least produces a sensible closed shape)
+    cb(90, "Usando convex hull como último recurso…")
+    mesh = trimesh.PointCloud(pts.astype(np.float32)).convex_hull
     cb(92, "Exportando OBJ…")
     mesh.export(obj_path)
     return obj_path
