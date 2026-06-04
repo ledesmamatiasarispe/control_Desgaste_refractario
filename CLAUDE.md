@@ -35,18 +35,14 @@ refractory_analyzer/          ← raíz del repo (app de escritorio)
 │   ├── server.py             ← Flask API, jobs en memoria, frames en disco
 │   ├── reconstructor.py      ← pycolmap → Meshroom CLI → error
 │   └── start_server.bat      ← doble clic para iniciar servidor
-├── android_app/
-│   ├── main.py               ← MDApp Kivy, llama updater.inject_update_path() PRIMERO
-│   ├── version.py            ← VERSION = "x.y.z"  ← EDITAR ESTO PARA RELEASE
-│   ├── updater.py            ← GitHub Releases API, descarga APK, FileProvider install
-│   ├── buildozer.spec        ← config APK, p4a.hook = p4a_hook.py
-│   ├── p4a_hook.py           ← inyecta FileProvider en AndroidManifest
-│   ├── res/xml/
-│   │   └── provider_paths.xml ← rutas FileProvider (cache y external)
-│   └── screens/
-│       ├── connect.py        ← IP del PC, GET /ping
-│       ├── capture.py        ← cámara + IMU, filtro de gyro, buffer de frames
-│       └── progress.py       ← upload frame a frame con retry, polling /status
+├── android_app/              ← PROYECTO ANDROID NATIVO (Kotlin)
+│   ├── build.gradle.kts      ← Configuración de Gradle
+│   ├── app/src/main/java/com/refractoryanalyzer/
+│   │   ├── MainActivity.kt
+│   │   ├── CaptureFragment.kt  ← Lógica de cámara y sensores
+│   │   ├── ConnectFragment.kt  ← Conexión al servidor Flask
+│   │   └── ProgressFragment.kt ← Upload y Reconstrucción
+│   └── res/navigation/nav_graph.xml
 └── .github/
     └── workflows/
         └── build-apk.yml     ← GitHub Actions: buildozer → Release automático
