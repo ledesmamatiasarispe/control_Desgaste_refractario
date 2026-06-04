@@ -22,6 +22,7 @@ except ImportError:
 
 class _JobCard(QFrame):
     regenerate_clicked = Signal(str)   # job_id
+    export_clicked     = Signal(str)   # job_id
 
     def __init__(self, job: dict, parent=None):
         super().__init__(parent)
@@ -68,6 +69,12 @@ class _JobCard(QFrame):
         self._btn_regen.setToolTip("Volver a generar la malla desde las fotos guardadas")
         self._btn_regen.clicked.connect(lambda: self.regenerate_clicked.emit(self.job_id))
         row2.addWidget(self._btn_regen)
+
+        self._btn_export = QPushButton("💾")
+        self._btn_export.setFixedSize(28, 22)
+        self._btn_export.setToolTip("Exportar como .refscan (ZIP con fotos + malla)")
+        self._btn_export.clicked.connect(lambda: self.export_clicked.emit(self.job_id))
+        row2.addWidget(self._btn_export)
         lay.addLayout(row2)
 
         self.update_job(job)
@@ -142,7 +149,7 @@ class JobsPanel(QWidget):
         hdr.addWidget(self._btn_refresh)
         lay.addLayout(hdr)
 
-        btn_import = QPushButton("📁 Buscar carpeta de escaneo…")
+        btn_import = QPushButton("📁 Importar escaneo (.refscan o carpeta)…")
         btn_import.setToolTip("Importar imágenes de una carpeta existente como nuevo trabajo")
         btn_import.clicked.connect(self._browse_folder)
         lay.addWidget(btn_import)
@@ -213,6 +220,7 @@ class JobsPanel(QWidget):
             else:
                 card = _JobCard(job)
                 card.regenerate_clicked.connect(self._on_regenerate)
+                card.export_clicked.connect(self._on_export)
                 self._cards[jid] = card
                 # Insertar antes del stretch
                 self._cards_layout.insertWidget(
@@ -255,38 +263,92 @@ class JobsPanel(QWidget):
                                      Q_ARG(str, f"Error: {e}"))
 
     def _browse_folder(self):
-        folder = QFileDialog.getExistingDirectory(
-            self, "Seleccionar carpeta de escaneo", self._browse_root,
+        # Permite seleccionar carpeta con fotos O archivo .refscan
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Seleccionar escaneo",
+            self._browse_root,
+            "Escaneos (*.refscan);;Todos los archivos (*)",
         )
-        if not folder:
+        if not path:
+            # Fallback: seleccionar carpeta
+            path = QFileDialog.getExistingDirectory(
+                self, "Seleccionar carpeta con fotos", self._browse_root,
+            )
+        if not path:
             return
         if not self._server_ip:
             self._lbl_status.setText("Sin servidor — reiniciá la app")
             return
-        self._lbl_status.setText(f"Importando {pathlib.Path(folder).name}…")
+        self._lbl_status.setText(f"Importando {pathlib.Path(path).name}…")
         ip = self._server_ip
-        threading.Thread(target=self._do_import, args=(ip, folder), daemon=True).start()
+        is_refscan = path.endswith(".refscan")
+        threading.Thread(
+            target=self._do_import_refscan if is_refscan else self._do_import,
+            args=(ip, path), daemon=True
+        ).start()
 
     def _do_import(self, ip: str, folder: str):
         try:
             r = _requests.post(
                 f"http://{ip}:5005/import_folder",
-                json={"folder": folder},
-                timeout=30,
+                json={"folder": folder}, timeout=30,
             )
             data = r.json()
-            if "error" in data:
-                msg = f"Error: {data['error']}"
-            else:
-                msg = f"Importado — {data['frames']} fotos (job {data['job_id']})"
+            msg = f"Error: {data['error']}" if "error" in data \
+                  else f"Importado — {data['frames']} fotos (job {data['job_id']})"
             from PySide6.QtCore import QMetaObject, Q_ARG
-            QMetaObject.invokeMethod(self, "_set_status",
-                                     Qt.QueuedConnection, Q_ARG(str, msg))
+            QMetaObject.invokeMethod(self, "_set_status", Qt.QueuedConnection, Q_ARG(str, msg))
             self._fetch_jobs()
         except Exception as e:
             from PySide6.QtCore import QMetaObject, Q_ARG
-            QMetaObject.invokeMethod(self, "_set_status",
-                                     Qt.QueuedConnection, Q_ARG(str, f"Error: {e}"))
+            QMetaObject.invokeMethod(self, "_set_status", Qt.QueuedConnection, Q_ARG(str, f"Error: {e}"))
+
+    def _do_import_refscan(self, ip: str, path: str):
+        try:
+            r = _requests.post(
+                f"http://{ip}:5005/import_refscan",
+                json={"path": path}, timeout=60,
+            )
+            data = r.json()
+            msg = f"Error: {data['error']}" if "error" in data \
+                  else f"✓ .refscan importado — {data['frames']} fotos (job {data['job_id']})"
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(self, "_set_status", Qt.QueuedConnection, Q_ARG(str, msg))
+            self._fetch_jobs()
+        except Exception as e:
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(self, "_set_status", Qt.QueuedConnection, Q_ARG(str, f"Error: {e}"))
+
+    def _on_export(self, job_id: str):
+        if not self._server_ip:
+            return
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Guardar escaneo como…",
+            str(pathlib.Path(self._browse_root) / f"scan_{job_id}.refscan"),
+            "Escaneos (*.refscan)",
+        )
+        if not dest:
+            return
+        self._lbl_status.setText(f"Exportando {job_id}…")
+        ip = self._server_ip
+        threading.Thread(target=self._do_export, args=(ip, job_id, dest), daemon=True).start()
+
+    def _do_export(self, ip: str, job_id: str, dest: str):
+        try:
+            r = _requests.get(f"http://{ip}:5005/export/{job_id}", timeout=120, stream=True)
+            if r.status_code == 200:
+                with open(dest, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        f.write(chunk)
+                size_mb = pathlib.Path(dest).stat().st_size / 1_048_576
+                msg = f"✓ Guardado: {pathlib.Path(dest).name} ({size_mb:.1f} MB)"
+            else:
+                msg = f"Error {r.status_code}: {r.text[:100]}"
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(self, "_set_status", Qt.QueuedConnection, Q_ARG(str, msg))
+        except Exception as e:
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(self, "_set_status", Qt.QueuedConnection, Q_ARG(str, f"Error: {e}"))
 
     def _set_status(self, msg: str):
         self._lbl_status.setText(msg)

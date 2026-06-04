@@ -293,6 +293,97 @@ def download(job_id: str):
                      download_name=pathlib.Path(job.output_path).name)
 
 
+@app.get("/export/<job_id>")
+def export_job(job_id: str):
+    """Exportar un job como archivo .refscan (ZIP)."""
+    import shutil, zipfile, io
+    from datetime import datetime
+
+    job = _job(job_id)
+    if job is None:
+        return jsonify({"error": "job not found"}), 404
+
+    job_dir = WORK_ROOT / job_id
+    if not job_dir.exists():
+        return jsonify({"error": "carpeta del job no encontrada"}), 404
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Metadata
+        info = {
+            "job_id":       job_id,
+            "status":       job.status,
+            "total_frames": job.total_frames,
+            "created_at":   job.created_at,
+            "exported_at":  __import__('time').time(),
+        }
+        zf.writestr("job_info.json", json.dumps(info, indent=2))
+
+        # Fotos e IMU
+        img_dir = job_dir / "images"
+        if img_dir.exists():
+            for f in sorted(img_dir.iterdir()):
+                zf.write(str(f), f"images/{f.name}")
+
+        # Resultados
+        out_dir = job_dir / "output"
+        if out_dir.exists():
+            for f in out_dir.iterdir():
+                if f.suffix in (".obj", ".ply", ".mtl"):
+                    zf.write(str(f), f"output/{f.name}")
+
+    buf.seek(0)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=f"scan_{ts}_{job_id}.refscan",
+        mimetype="application/zip",
+    )
+
+
+@app.post("/import_refscan")
+def import_refscan():
+    """Importar un archivo .refscan como nuevo job."""
+    import zipfile
+
+    data   = request.get_json(silent=True) or {}
+    path   = data.get("path", "")
+    if not path or not pathlib.Path(path).exists():
+        return jsonify({"error": "archivo no encontrado"}), 400
+
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            names = zf.namelist()
+            # Leer metadata
+            info = {}
+            if "job_info.json" in names:
+                info = json.loads(zf.read("job_info.json"))
+
+            job   = _new_job()
+            jid   = job.job_id
+            dst   = WORK_ROOT / jid
+            zf.extractall(str(dst))
+
+        # Contar imágenes extraídas
+        images = sorted((dst / "images").glob("*.jpg")) if (dst / "images").exists() else []
+        has_mesh = (dst / "output" / "mesh.obj").exists()
+        has_ply  = (dst / "output" / "sparse.ply").exists()
+
+        with _lock:
+            job.received_frames = set(range(len(images)))
+            job.total_frames    = len(images)
+            job.status          = "done" if has_mesh else ("preview_done" if has_ply else "uploading")
+            job.message         = f"Importado desde .refscan ({len(images)} fotos)"
+            job.output_path     = str(dst / "output" / "mesh.obj") if has_mesh else None
+            job.sparse_ply      = str(dst / "output" / "sparse.ply") if has_ply else None
+
+        log.info(f"Imported .refscan → job {jid} ({len(images)} frames, status={job.status})")
+        return jsonify({"job_id": jid, "frames": len(images), "status": job.status})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.get("/jobs")
 def list_jobs():
     with _lock:
