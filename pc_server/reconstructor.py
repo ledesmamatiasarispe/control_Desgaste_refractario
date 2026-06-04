@@ -60,6 +60,130 @@ def reconstruct(
     )
 
 
+# ── sparse-only (preview) ─────────────────────────────────────────────────────
+
+def reconstruct_sparse(
+    image_folder: str,
+    imu_file: str,
+    output_dir: str,
+    progress_cb: Callable[[int, str], None],
+) -> str:
+    """
+    Run only SfM (feature extraction + matching + incremental mapping).
+    Returns path to sparse point cloud PLY. Fast (~1 min on CPU).
+    """
+    import pycolmap
+
+    img_path    = pathlib.Path(image_folder)
+    out_path    = pathlib.Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    db_path     = out_path / "database.db"
+    sparse_path = out_path / "sparse"
+    sparse_path.mkdir(exist_ok=True)
+
+    imu_data = _load_imu(imu_file)
+
+    progress_cb(5, "Configurando cámara…")
+    reader_opts = pycolmap.ImageReaderOptions()
+    focal_px = _median_focal(imu_data)
+    if focal_px:
+        width  = imu_data.get("width",  1920)
+        height = imu_data.get("height", 1080)
+        reader_opts.default_focal_length_factor = focal_px / max(width, height)
+
+    progress_cb(10, "Extrayendo características SIFT…")
+    extraction_opts = pycolmap.FeatureExtractionOptions()
+    extraction_opts.sift.max_num_features = 8192
+    extraction_opts.max_image_size        = 2400
+    extraction_opts.num_threads           = 2
+    jpg_names = sorted([f.name for f in img_path.glob("*.jpg")])
+    pycolmap.extract_features(
+        db_path, img_path,
+        image_names=jpg_names,
+        reader_options=reader_opts,
+        extraction_options=extraction_opts,
+    )
+
+    progress_cb(30, "Buscando correspondencias…")
+    seq_opts = pycolmap.SequentialPairingOptions()
+    seq_opts.overlap        = 20
+    seq_opts.loop_detection = False
+    pycolmap.match_sequential(db_path, pairing_options=seq_opts)
+
+    progress_cb(50, "Reconstruyendo estructura dispersa (SfM)…")
+    maps = pycolmap.incremental_mapping(db_path, img_path, sparse_path)
+    if not maps:
+        raise RuntimeError("SfM no encontró suficientes correspondencias.")
+
+    best_recon = max(maps.values(), key=lambda r: len(r.images))
+    best_recon.write(str(sparse_path / "0"))
+    log.info(f"SfM preview: {len(best_recon.images)} images, {len(best_recon.points3D)} pts")
+
+    progress_cb(80, "Exportando nube de puntos…")
+    ply_path = str(out_path / "sparse.ply")
+    _export_sparse_ply(best_recon, ply_path)
+
+    progress_cb(100, f"✓ Nube lista — {len(best_recon.points3D):,} puntos")
+    return ply_path
+
+
+def reconstruct_dense(
+    image_folder: str,
+    output_dir: str,
+    progress_cb: Callable[[int, str], None],
+) -> str:
+    """
+    Run MVS + meshing from an existing SfM sparse reconstruction in output_dir.
+    Returns path to mesh OBJ.
+    """
+    import pycolmap
+
+    img_path    = pathlib.Path(image_folder)
+    out_path    = pathlib.Path(output_dir)
+    sparse_path = out_path / "sparse" / "0"
+    dense_path  = out_path / "dense"
+    dense_path.mkdir(exist_ok=True)
+
+    # Load the already-computed reconstruction
+    recon = pycolmap.Reconstruction(str(sparse_path))
+    obj_path = str(out_path / "mesh.obj")
+
+    try:
+        progress_cb(5, "Densificando nube de puntos (MVS)…")
+        _dense_pipeline(recon, img_path, dense_path, progress_cb)
+        obj_path = _poisson_mesh(dense_path, out_path, progress_cb)
+    except Exception as e:
+        log.warning(f"Dense pipeline failed ({e}), using sparse fallback")
+        progress_cb(50, "MVS falló — generando malla desde nube dispersa…")
+        obj_path = _mesh_from_sparse(recon, out_path, progress_cb)
+
+    progress_cb(100, "✓ Malla completa lista")
+    return obj_path
+
+
+def _export_sparse_ply(recon, ply_path: str):
+    """Export sparse point cloud as ASCII PLY with XYZ + RGB."""
+    pts = list(recon.points3D.values())
+    lines = [
+        "ply",
+        "format ascii 1.0",
+        f"element vertex {len(pts)}",
+        "property float x",
+        "property float y",
+        "property float z",
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
+        "end_header",
+    ]
+    for p in pts:
+        x, y, z = p.xyz
+        r, g, b = p.color[:3]
+        lines.append(f"{x:.6f} {y:.6f} {z:.6f} {int(r)} {int(g)} {int(b)}")
+    pathlib.Path(ply_path).write_text("\n".join(lines))
+
+
 # ── pycolmap pipeline ─────────────────────────────────────────────────────────
 
 def _reconstruct_colmap(

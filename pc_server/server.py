@@ -65,12 +65,13 @@ def set_work_root(path: str):
 @dataclass
 class Job:
     job_id:          str
-    status:          str          = "waiting"   # waiting/uploading/running/done/error
+    status:          str          = "waiting"   # waiting/uploading/running/preview_done/done/error
     progress:        int          = 0
     message:         str          = ""
     received_frames: Set[int]     = field(default_factory=set)
     total_frames:    int          = 0
     output_path:     Optional[str] = None
+    sparse_ply:      Optional[str] = None   # path to sparse point cloud PLY
     error:           Optional[str] = None
 
     def to_dict(self):
@@ -160,24 +161,59 @@ def start_reconstruct(job_id: str):
 
     data = request.get_json(silent=True) or {}
     job.total_frames = data.get("total_frames", len(job.received_frames))
+    mode = data.get("mode", "full")   # "preview" → solo SfM | "full" → SfM + MVS + malla
 
     if len(job.received_frames) < 5:
         return jsonify({"error": "se necesitan al menos 5 fotogramas"}), 400
 
-    # Build IMU summary file + store alignment points from phone
     align_pts = data.get("align_pts", [])
     _build_imu_summary(job_id, align_pts=align_pts)
 
-    # Start reconstruction in background thread
     with _lock:
         job.status = "running"
         job.progress = 0
         job.message = "Iniciando…"
 
-    t = threading.Thread(target=_run_reconstruction, args=(job,), daemon=True)
+    target = _run_preview if mode == "preview" else _run_reconstruction
+    t = threading.Thread(target=target, args=(job,), daemon=True)
     t.start()
 
-    log.info(f"Job {job_id}: reconstruction started with {len(job.received_frames)} frames")
+    log.info(f"Job {job_id}: {mode} started with {len(job.received_frames)} frames")
+    return jsonify({"ok": True, "mode": mode})
+
+
+@app.get("/pointcloud/<job_id>")
+def pointcloud(job_id: str):
+    """Download the sparse point cloud PLY generated during preview."""
+    job = _job(job_id)
+    if job is None:
+        return jsonify({"error": "job not found"}), 404
+    if job.status not in ("preview_done", "done") or not job.sparse_ply:
+        return jsonify({"error": "point cloud not ready"}), 400
+    return send_file(job.sparse_ply, as_attachment=True,
+                     download_name="pointcloud.ply", mimetype="application/octet-stream")
+
+
+@app.post("/continue_reconstruct/<job_id>")
+def continue_reconstruct(job_id: str):
+    """Trigger full MVS + mesh generation from an already-completed preview SfM."""
+    job = _job(job_id)
+    if job is None:
+        return jsonify({"error": "job not found"}), 404
+    if job.status == "running":
+        return jsonify({"ok": True, "message": "already running"})
+    if job.status != "preview_done":
+        return jsonify({"error": f"job must be in preview_done state, is {job.status}"}), 400
+
+    with _lock:
+        job.status   = "running"
+        job.progress = 50
+        job.message  = "Continuando con reconstrucción densa…"
+
+    t = threading.Thread(target=_run_dense_from_sparse, args=(job,), daemon=True)
+    t.start()
+
+    log.info(f"Job {job_id}: continuing to full reconstruction")
     return jsonify({"ok": True})
 
 
@@ -206,7 +242,99 @@ def list_jobs():
         return jsonify([j.to_dict() for j in _jobs.values()])
 
 
-# ── reconstruction worker ─────────────────────────────────────────────────────
+# ── reconstruction workers ────────────────────────────────────────────────────
+
+def _run_preview(job: Job):
+    """Run only SfM → export sparse PLY. Fast (~1 min on CPU)."""
+    from reconstructor import reconstruct_sparse
+
+    work_dir = WORK_ROOT / job.job_id
+    image_dir = work_dir / "images"
+    out_dir   = work_dir / "output"
+    imu_file  = work_dir / "imu_summary.json"
+
+    def cb(pct, msg):
+        with _lock:
+            job.progress = pct
+            job.message  = msg
+        log.info(f"Job {job.job_id} preview [{pct:3d}%] {msg}")
+
+    try:
+        ply_path = reconstruct_sparse(
+            image_folder=str(image_dir),
+            imu_file=str(imu_file),
+            output_dir=str(out_dir),
+            progress_cb=cb,
+        )
+        with _lock:
+            job.status     = "preview_done"
+            job.progress   = 100
+            job.message    = "✓ Nube de puntos lista"
+            job.sparse_ply = ply_path
+        log.info(f"Job {job.job_id} preview done → {ply_path}")
+    except Exception as e:
+        with _lock:
+            job.status  = "error"
+            job.error   = str(e)
+            job.message = f"Error en preview: {e}"
+        log.error(f"Job {job.job_id} preview failed: {e}", exc_info=True)
+
+
+def _run_dense_from_sparse(job: Job):
+    """Run MVS + meshing from the SfM already stored in the job's output dir."""
+    from reconstructor import reconstruct_dense
+
+    work_dir  = WORK_ROOT / job.job_id
+    image_dir = work_dir / "images"
+    out_dir   = work_dir / "output"
+    imu_file  = work_dir / "imu_summary.json"
+
+    def cb(pct, msg):
+        with _lock:
+            job.progress = 50 + pct // 2   # 50-100 range
+            job.message  = msg
+        log.info(f"Job {job.job_id} dense [{pct:3d}%] {msg}")
+
+    try:
+        obj_path = reconstruct_dense(
+            image_folder=str(image_dir),
+            output_dir=str(out_dir),
+            progress_cb=cb,
+        )
+        _finalize_job(job, obj_path)
+    except Exception as e:
+        with _lock:
+            job.status  = "error"
+            job.error   = str(e)
+            job.message = f"Error en reconstrucción densa: {e}"
+        log.error(f"Job {job.job_id} dense failed: {e}", exc_info=True)
+
+
+def _finalize_job(job: Job, obj_path: str):
+    import shutil
+    from datetime import datetime
+    ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = OUTPUT_DIR / f"scan_{ts}_{job.job_id}.obj"
+    shutil.copy2(obj_path, dest)
+    work_dir = WORK_ROOT / job.job_id
+    try:
+        shutil.rmtree(work_dir)
+    except Exception as e:
+        log.warning(f"Could not clean temp dir: {e}")
+    with _lock:
+        job.status      = "done"
+        job.progress    = 100
+        job.message     = f"✓ Listo — {dest.name}"
+        job.output_path = str(dest)
+    log.info(f"Job {job.job_id} done → {dest}")
+    if _on_mesh_ready_cb:
+        try:
+            from datetime import datetime as dt
+            scan_name = f"Escaneo {dt.now().strftime('%d/%m/%Y %H:%M')}"
+            _on_mesh_ready_cb(str(dest), scan_name)
+        except Exception as e:
+            log.warning(f"mesh_ready_cb error: {e}")
+
 
 def _run_reconstruction(job: Job):
     from reconstructor import reconstruct
@@ -224,43 +352,12 @@ def _run_reconstruction(job: Job):
 
     try:
         obj_path = reconstruct(
-            image_folder = str(image_dir),
-            imu_file     = str(imu_file),
-            output_dir   = str(out_dir),
-            progress_cb  = cb,
+            image_folder=str(image_dir),
+            imu_file=str(imu_file),
+            output_dir=str(out_dir),
+            progress_cb=cb,
         )
-
-        # Copy to output folder for the desktop app
-        from datetime import datetime
-        import shutil
-        ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest = OUTPUT_DIR / f"scan_{ts}_{job.job_id}.obj"
-        shutil.copy2(obj_path, dest)
-
-        # Limpiar carpeta temporal del job (fotos, db, intermedios)
-        try:
-            shutil.rmtree(work_dir)
-            log.info(f"Job {job.job_id} temp dir cleaned")
-        except Exception as clean_err:
-            log.warning(f"Could not clean temp dir: {clean_err}")
-
-        with _lock:
-            job.status      = "done"
-            job.progress    = 100
-            job.message     = f"✓ Listo — {dest.name}"
-            job.output_path = str(dest)
-
-        log.info(f"Job {job.job_id} done → {dest}")
-
-        # Notify desktop app if running embedded
-        if _on_mesh_ready_cb:
-            try:
-                from datetime import datetime
-                scan_name = f"Escaneo {datetime.now().strftime('%d/%m/%Y %H:%M')}"
-                _on_mesh_ready_cb(str(dest), scan_name)
-            except Exception as cb_err:
-                log.warning(f"mesh_ready_cb error: {cb_err}")
-
+        _finalize_job(job, obj_path)
     except Exception as e:
         with _lock:
             job.status  = "error"

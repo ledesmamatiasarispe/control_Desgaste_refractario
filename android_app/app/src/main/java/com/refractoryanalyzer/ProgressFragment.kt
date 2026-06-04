@@ -130,9 +130,9 @@ class ProgressFragment : Fragment() {
             }
         }
 
-        // 4. Iniciar reconstrucción
-        updateStatus("Iniciando reconstrucción…", 60)
-        binding.tvUpload.text = "Procesando en el PC"
+        // 4. Iniciar preview (solo SfM — rápido)
+        updateStatus("Iniciando análisis de nube de puntos…", 60)
+        binding.tvUpload.text = "Calculando nube de puntos en el PC"
         if (!startReconstruction(serverIp, jid, frames.size)) {
             showError("El servidor no pudo iniciar el proceso 3D")
             return
@@ -155,13 +155,21 @@ class ProgressFragment : Fragment() {
             val message = statusJson.optString("message", "Calculando nube de puntos…")
 
             when (status) {
+                "preview_done" -> {
+                    updateStatus("✓ Nube de puntos lista", 100)
+                    FrameStore.frames = emptyList()
+                    val action = ProgressFragmentDirections
+                        .actionProgressToPointCloud(ip, jid)
+                    findNavController().navigate(action)
+                    return
+                }
                 "done" -> {
                     updateStatus("✓ Reconstrucción finalizada", 100)
                     binding.tvUpload.text = "Proceso completo"
                     binding.tvResult.visibility = View.VISIBLE
                     binding.tvResult.text = "✓ Mesh listo en el PC"
                     binding.btnCancel.text = "← Volver"
-                    FrameStore.frames = emptyList() // Clear all memory
+                    FrameStore.frames = emptyList()
                     return
                 }
                 "error" -> {
@@ -169,7 +177,6 @@ class ProgressFragment : Fragment() {
                     return
                 }
                 else -> {
-                    // Mapear 0-100 de reconstrucción a 60-100 de la UI
                     val totalProgress = 60 + (progress * 40 / 100)
                     updateStatus(message, totalProgress)
                 }
@@ -235,6 +242,7 @@ class ProgressFragment : Fragment() {
         val json = JSONObject().apply {
             put("total_frames", total)
             put("align_pts", JSONArray(alignJson))
+            put("mode", "preview")
         }
         val request = Request.Builder()
             .url("http://$ip:5005/start_reconstruct/$jid")

@@ -18,6 +18,13 @@
         <argument android:name="serverIp" app:argType="string"/>
         <action android:id="@+id/action_selection_to_capture"
             app:destination="@id/captureFragment"/>
+        <action android:id="@+id/action_selection_to_calibration"
+            app:destination="@id/calibrationFragment"/>
+    </fragment>
+
+    <fragment android:id="@+id/calibrationFragment"
+        android:name="com.refractoryanalyzer.CalibrationFragment"
+        android:label="Calibración">
     </fragment>
 
     <fragment android:id="@+id/captureFragment"
@@ -35,6 +42,21 @@
         <argument android:name="serverIp"    app:argType="string"/>
         <argument android:name="frameCount"  app:argType="integer" android:defaultValue="0"/>
         <argument android:name="framesCache" app:argType="integer[]"/>
+        <action android:id="@+id/action_progress_to_point_cloud"
+            app:destination="@id/pointCloudViewerFragment"/>
+    </fragment>
+
+    <fragment android:id="@+id/pointCloudViewerFragment"
+        android:name="com.refractoryanalyzer.PointCloudViewerFragment"
+        android:label="Nube de puntos">
+        <argument android:name="serverIp" app:argType="string"/>
+        <argument android:name="jobId"    app:argType="string"/>
+        <action android:id="@+id/action_point_cloud_to_capture"
+            app:destination="@id/captureFragment"
+            app:popUpTo="@id/captureFragment"
+            app:popUpToInclusive="true"/>
+        <action android:id="@+id/action_point_cloud_to_progress"
+            app:destination="@id/progressFragment"/>
     </fragment>
 
 </navigation>
