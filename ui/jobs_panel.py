@@ -123,6 +123,7 @@ class JobsPanel(QWidget):
         super().__init__(parent)
         self._server_ip: Optional[str] = None
         self._cards: dict[str, _JobCard] = {}
+        self._browse_root: str = str(pathlib.Path.home() / ".refractory_capture" / "jobs")
 
         lay = QVBoxLayout(self)
         lay.setSpacing(4)
@@ -255,8 +256,7 @@ class JobsPanel(QWidget):
 
     def _browse_folder(self):
         folder = QFileDialog.getExistingDirectory(
-            self, "Seleccionar carpeta de escaneo",
-            str(pathlib.Path.home() / ".refractory_capture" / "jobs"),
+            self, "Seleccionar carpeta de escaneo", self._browse_root,
         )
         if not folder:
             return

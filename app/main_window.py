@@ -1235,6 +1235,8 @@ class MainWindow(QMainWindow):
             if hasattr(self, '_flask_server'):
                 self._flask_server.set_work_root(s["work_root"])
                 self._flask_server.set_output_dir(s["output_dir"])
+                self._flask_server._load_existing_jobs()   # recargar jobs del nuevo directorio
+            self._jobs_panel._browse_root = s["work_root"]
             self._status_main.setText("✓ Configuración guardada")
 
     # ── embedded Flask server ────────────────────────────────────────────────
