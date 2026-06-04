@@ -531,7 +531,7 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
         val total    = capturedFrames.size
         val jid      = FrameStore.currentJobId
         val label    = if (jid.isEmpty()) "Sin conexión" else "↑ $uploaded/$total subidas"
-        binding.tvUploadStatus?.text = label
+        binding.tvUploadStatus.text = label
     }
 
     private fun viewPointCloud() {
@@ -549,14 +549,14 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
             while (isActive && FrameStore.uploadedFrameIds.size < totalToUpload) {
                 withContext(Dispatchers.Main) {
                     val uploaded = FrameStore.uploadedFrameIds.size
-                    binding.tvUploadStatus?.text = "Subiendo $uploaded/$totalToUpload…"
+                    binding.tvUploadStatus.text = "Subiendo $uploaded/$totalToUpload…"
                 }
                 delay(500)
             }
             if (!isActive) return@launch
 
             withContext(Dispatchers.Main) {
-                binding.tvUploadStatus?.text = "Iniciando análisis…"
+                binding.tvUploadStatus.text = "Iniciando análisis…"
             }
 
             try {
