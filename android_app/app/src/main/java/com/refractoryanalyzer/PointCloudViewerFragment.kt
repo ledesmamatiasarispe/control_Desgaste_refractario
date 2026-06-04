@@ -154,7 +154,7 @@ class PointCloudViewerFragment : Fragment() {
             override fun onResponse(call: Call, response: Response) {
                 requireActivity().runOnUiThread {
                     val action = PointCloudViewerFragmentDirections
-                        .actionPointCloudToProgress(args.serverIp, args.jobId, 0, IntArray(0), args.jobId)
+                        .actionPointCloudToProgress(args.serverIp, IntArray(0), existingJobId = args.jobId)
                     findNavController().navigate(action)
                 }
             }
