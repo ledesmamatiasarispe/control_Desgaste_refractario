@@ -472,20 +472,35 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
 
     private fun viewPointCloud() {
         val jid = FrameStore.currentJobId
-        if (jid.isEmpty() || FrameStore.uploadedFrameIds.size < 5) {
-            Toast.makeText(context, "Esperá — se están subiendo las fotos (mín. 5)", Toast.LENGTH_SHORT).show()
+        if (jid.isEmpty() || capturedFrames.size < 5) {
+            Toast.makeText(context, "Necesitás al menos 5 fotos capturadas", Toast.LENGTH_SHORT).show()
             return
         }
         stopAutoCapture()
-        uploadLoopJob?.cancel()
+        binding.btnSend.isEnabled = false
 
         viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+            // Esperar hasta que todas las fotos capturadas estén subidas
+            val totalToUpload = capturedFrames.size
+            while (isActive && FrameStore.uploadedFrameIds.size < totalToUpload) {
+                withContext(Dispatchers.Main) {
+                    val uploaded = FrameStore.uploadedFrameIds.size
+                    binding.tvUploadStatus?.text = "Subiendo $uploaded/$totalToUpload…"
+                }
+                delay(500)
+            }
+            if (!isActive) return@launch
+
+            withContext(Dispatchers.Main) {
+                binding.tvUploadStatus?.text = "Iniciando análisis…"
+            }
+
             try {
                 val alignJson = requireContext()
                     .getSharedPreferences("refractory_prefs", Context.MODE_PRIVATE)
                     .getString("align_pts_json", "[]")
                 val json = JSONObject().apply {
-                    put("total_frames", FrameStore.uploadedFrameIds.size)
+                    put("total_frames", totalToUpload)
                     put("align_pts", JSONArray(alignJson))
                     put("mode", "preview")
                 }
@@ -502,6 +517,7 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
+                    binding.btnSend.isEnabled = true
                     Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
             }
