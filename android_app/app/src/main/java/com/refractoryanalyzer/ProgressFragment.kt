@@ -179,7 +179,7 @@ class ProgressFragment : Fragment() {
                     binding.tvResult.visibility = View.VISIBLE
                     binding.tvResult.text = "✓ Mesh listo en el PC"
                     binding.btnCancel.text = "← Volver"
-                    FrameStore.frames = emptyList()
+                    FrameStore.reset()   // scan terminado — próximo scan arranca limpio
                     return
                 }
                 "error" -> {

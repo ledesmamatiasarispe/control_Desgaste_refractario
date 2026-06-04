@@ -173,10 +173,24 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
         binding.btnSend.setOnClickListener { viewPointCloud() }
         binding.btnBack.setOnClickListener { findNavController().popBackStack() }
 
-        // Resume upload loop if returning from point cloud viewer
-        if (FrameStore.currentJobId.isNotEmpty() && FrameStore.serverIp == args.serverIp) {
-            capturedFrames.clear()
-            startUploadLoop()
+        // Reanudar solo si el job pertenece a este servidor y sigue activo
+        val existingJob = FrameStore.currentJobId
+        if (existingJob.isNotEmpty() && FrameStore.serverIp == args.serverIp) {
+            // Verificar en background que el job no esté cerrado (done/error)
+            viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                val status = fetchJobStatus(args.serverIp, existingJob)
+                withContext(Dispatchers.Main) {
+                    if (status == "done" || status == "error") {
+                        // Job cerrado — arrancar nuevo scan
+                        FrameStore.reset()
+                        FrameStore.serverIp = args.serverIp
+                        ensureJobCreated()
+                    } else {
+                        // Job válido — continuar subiendo
+                        startUploadLoop()
+                    }
+                }
+            }
         } else {
             FrameStore.reset()
             FrameStore.serverIp = args.serverIp
@@ -402,6 +416,17 @@ class CaptureFragment : Fragment(), SensorEventListener, GLSurfaceView.Renderer 
     }
 
     // ── streaming upload ──────────────────────────────────────────────────────
+
+    private fun fetchJobStatus(ip: String, jid: String): String {
+        return try {
+            httpClient.newCall(
+                Request.Builder().url("http://$ip:5005/status/$jid").build()
+            ).execute().use { resp ->
+                if (resp.isSuccessful) JSONObject(resp.body!!.string()).optString("status", "error")
+                else "error"
+            }
+        } catch (e: Exception) { "error" }
+    }
 
     private fun ensureJobCreated() {
         if (FrameStore.currentJobId.isNotEmpty()) { startUploadLoop(); return }

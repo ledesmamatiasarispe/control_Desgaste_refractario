@@ -82,7 +82,9 @@ class ConnectFragment : Fragment() {
                     putString("server_ip", ip)
                 }
                 
-                // Navegar a Selección de modo
+                // Nueva sesión — limpiar estado del scan anterior
+                FrameStore.reset()
+
                 val action = ConnectFragmentDirections.actionConnectToSelection(ip)
                 findNavController().navigate(action)
             } else {
