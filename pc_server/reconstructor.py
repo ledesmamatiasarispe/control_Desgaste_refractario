@@ -94,8 +94,8 @@ def reconstruct_sparse(
 
     progress_cb(10, "Extrayendo características SIFT…")
     extraction_opts = pycolmap.FeatureExtractionOptions()
-    extraction_opts.sift.max_num_features = 8192
-    extraction_opts.max_image_size        = 2400
+    extraction_opts.sift.max_num_features = 16384   # más features para superficies oscuras
+    extraction_opts.max_image_size        = 3200    # mayor resolución = más detalle
     extraction_opts.num_threads           = 2
     jpg_names = sorted([f.name for f in img_path.glob("*.jpg")])
     pycolmap.extract_features(
@@ -105,11 +105,18 @@ def reconstruct_sparse(
         extraction_options=extraction_opts,
     )
 
+    # Matching exhaustivo para < 150 fotos (compara todas contra todas → más correspondencias)
+    # Secuencial para más fotos (exhaustivo sería demasiado lento)
     progress_cb(30, "Buscando correspondencias…")
-    seq_opts = pycolmap.SequentialPairingOptions()
-    seq_opts.overlap        = 20
-    seq_opts.loop_detection = False
-    pycolmap.match_sequential(db_path, pairing_options=seq_opts)
+    if len(jpg_names) <= 150:
+        progress_cb(30, "Buscando correspondencias (exhaustivo)…")
+        pycolmap.match_exhaustive(db_path)
+    else:
+        progress_cb(30, "Buscando correspondencias (secuencial)…")
+        seq_opts = pycolmap.SequentialPairingOptions()
+        seq_opts.overlap        = 30
+        seq_opts.loop_detection = False
+        pycolmap.match_sequential(db_path, pairing_options=seq_opts)
 
     progress_cb(50, "Reconstruyendo estructura dispersa (SfM)…")
     maps = pycolmap.incremental_mapping(db_path, img_path, sparse_path)
@@ -120,16 +127,25 @@ def reconstruct_sparse(
     best_recon.write(str(sparse_path / "0"))
     log.info(f"SfM preview: {len(best_recon.images)} images, {len(best_recon.points3D)} pts")
 
-    progress_cb(75, "Extrayendo colores de las imágenes…")
-    try:
-        best_recon.extract_colors_for_all_images(str(img_path))
-        log.info("Colors extracted OK")
-    except Exception as e:
-        log.warning(f"Color extraction failed: {e}")
-
-    progress_cb(85, "Exportando nube de puntos…")
+    progress_cb(80, "Exportando nube de puntos…")
     ply_path = str(out_path / "sparse.ply")
+
+    # Extraer colores en paralelo mientras se exporta el PLY
+    import threading
+    color_done = threading.Event()
+    def _extract_colors():
+        try:
+            best_recon.extract_colors_for_all_images(str(img_path))
+            _export_sparse_ply(best_recon, ply_path)   # re-exportar con colores reales
+            log.info("Colors extracted and PLY updated")
+        except Exception as e:
+            log.warning(f"Color extraction failed: {e}")
+        finally:
+            color_done.set()
+
+    # Exportar sin colores primero (rápido) para que el cliente pueda empezar a descargar
     _export_sparse_ply(best_recon, ply_path)
+    threading.Thread(target=_extract_colors, daemon=True).start()
 
     progress_cb(100, f"✓ Nube lista — {len(best_recon.points3D):,} puntos")
     return ply_path
@@ -167,6 +183,29 @@ def reconstruct_dense(
 
     progress_cb(100, "✓ Malla completa lista")
     return obj_path
+
+
+def _smooth_and_fill(mesh):
+    """Suavizar la malla y rellenar huecos pequeños."""
+    import trimesh.smoothing
+    try:
+        # Eliminar triángulos degenerados y componentes desconectados pequeños
+        mesh.remove_degenerate_faces()
+        mesh.remove_duplicate_faces()
+        mesh.remove_unreferenced_vertices()
+
+        # Quedarse solo con el componente conexo más grande
+        components = mesh.split(only_watertight=False)
+        if components:
+            mesh = max(components, key=lambda m: len(m.faces))
+
+        # Suavizado Laplaciano (reduce spikes sin destruir la forma)
+        trimesh.smoothing.filter_laplacian(mesh, lamb=0.5, iterations=5)
+
+        log.info(f"Smoothed mesh: {len(mesh.faces)} faces")
+    except Exception as e:
+        log.warning(f"Smooth/fill failed: {e}")
+    return mesh
 
 
 def _export_sparse_ply(recon, ply_path: str):
@@ -227,10 +266,9 @@ def _reconstruct_colmap(
     # ── 2. Feature extraction ──
     cb(10, "Extrayendo características SIFT…")
     extraction_opts = pycolmap.FeatureExtractionOptions()
-    extraction_opts.sift.max_num_features = 8192  # was 2048 — more features for low-texture
-    extraction_opts.max_image_size = 2400          # was 1600 — better quality, 2 threads is safe
-    extraction_opts.num_threads   = 2              # keep low to avoid OOM crash
-    # Pass only JPG filenames — the images/ folder also has .json metadata files
+    extraction_opts.sift.max_num_features = 16384
+    extraction_opts.max_image_size        = 3200
+    extraction_opts.num_threads           = 2
     jpg_names = sorted([f.name for f in image_path.glob("*.jpg")])
     pycolmap.extract_features(
         db_path, image_path,
@@ -239,15 +277,16 @@ def _reconstruct_colmap(
         extraction_options=extraction_opts,
     )
 
-    # ── 3. Sequential matching (better than exhaustive for cylindrical/symmetric objects) ──
-    # Exhaustive matching causes wrong correspondences in symmetric furnaces
-    # (frame 5 matches frame 45 pointing at the same side → wrong camera poses)
-    # Sequential matching only compares each frame with its N temporal neighbors
-    cb(25, "Buscando correspondencias secuenciales…")
-    seq_opts = pycolmap.SequentialPairingOptions()
-    seq_opts.overlap        = 20    # compare each frame with its 20 temporal neighbors
-    seq_opts.loop_detection = False # vocab tree not available; disable loop closure
-    pycolmap.match_sequential(db_path, pairing_options=seq_opts)
+    # Exhaustivo para ≤150 fotos, secuencial para más
+    if len(jpg_names) <= 150:
+        cb(25, "Buscando correspondencias (exhaustivo)…")
+        pycolmap.match_exhaustive(db_path)
+    else:
+        cb(25, "Buscando correspondencias (secuencial)…")
+        seq_opts = pycolmap.SequentialPairingOptions()
+        seq_opts.overlap        = 30
+        seq_opts.loop_detection = False
+        pycolmap.match_sequential(db_path, pairing_options=seq_opts)
 
     # ── 4. Sparse SfM ──
     cb(40, "Reconstruyendo estructura dispersa (SfM)…")
@@ -397,16 +436,17 @@ def _mesh_from_sparse(recon, out_path: pathlib.Path, cb: Callable) -> str:
             if len(boundary) > 0:
                 faces = np.array(boundary, dtype=np.int64)
                 mesh  = trimesh.Trimesh(vertices=pts, faces=faces, process=True)
-                mesh  = mesh.as_open3d if False else mesh   # keep as trimesh
                 if len(mesh.faces) > 0:
-                    cb(92, f"Exportando alpha shape ({len(mesh.faces):,} caras)…")
+                    # Suavizar y rellenar huecos
+                    mesh = _smooth_and_fill(mesh)
+                    cb(92, f"Exportando malla ({len(mesh.faces):,} caras)…")
                     mesh.export(obj_path)
                     return obj_path
 
     except Exception as e:
         log.warning(f"Alpha shape failed: {e} — using convex hull")
 
-    # Last resort: convex hull (at least produces a sensible closed shape)
+    # Last resort: convex hull
     cb(90, "Usando convex hull como último recurso…")
     mesh = trimesh.PointCloud(pts.astype(np.float32)).convex_hull
     cb(92, "Exportando OBJ…")
