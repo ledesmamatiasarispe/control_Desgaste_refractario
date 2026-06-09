@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QStatusBar, QToolBar, QMessageBox, QLabel, QSplitter,
     QGroupBox, QFormLayout, QComboBox, QSlider, QFrame,
     QFileDialog, QInputDialog, QPushButton, QMenu, QTabWidget,
+    QCheckBox,
 )
 from PySide6.QtGui import QAction, QFont, QColor
 from PySide6.QtCore import QSize
@@ -89,6 +90,24 @@ class MainWindow(QMainWindow):
         self._start_embedded_server()
 
         from PySide6.QtCore import QTimer
+        # Debounce timer for live slider diameter measurement (X slider, Diámetro checkbox)
+        self._diam_timer = QTimer(self)
+        self._diam_timer.setSingleShot(True)
+        self._diam_timer.setInterval(120)
+        self._diam_timer.timeout.connect(self._trigger_slider_diameter)
+
+        # Debounce timer for Y radial scan (always active with two meshes)
+        self._radial_timer = QTimer(self)
+        self._radial_timer.setSingleShot(True)
+        self._radial_timer.setInterval(180)
+        self._radial_timer.timeout.connect(self._trigger_radial_scan)
+
+        # Debounce timer for X profile scan (active when Perfil checkbox is checked)
+        self._profile_timer = QTimer(self)
+        self._profile_timer.setSingleShot(True)
+        self._profile_timer.setInterval(250)   # slightly longer — trimesh section is heavier
+        self._profile_timer.timeout.connect(self._trigger_profile_scan)
+
         QTimer.singleShot(0, self._restore_last_project)
 
     # ── UI construction ──────────────────────────────────────────────────────
@@ -122,7 +141,13 @@ class MainWindow(QMainWindow):
         self._gl.align_ready.connect(self._on_align_ready)
         self._gl.calibrate_ready.connect(self._on_calibrate_ready)
         self._gl.measure_done.connect(self._on_measurement)
+        self._gl.diameter_done.connect(self._on_diameter)
         self._gl.crop_ready.connect(self._on_crop_ready)
+        self._gl.faces_erased.connect(self._on_faces_erased)
+        self._gl.erase_updated.connect(self._on_erase_updated)
+        self._gl.depth_done.connect(self._on_depth)
+        self._gl.radial_scan_done.connect(self._on_radial_scan)
+        self._gl.profile_scan_done.connect(self._on_profile_scan)
 
         # Right panel
         right = self._build_right_panel()
@@ -140,10 +165,11 @@ class MainWindow(QMainWindow):
         return f"{v:.{self._unit_decimals}f} {self._unit_suffix}"
 
     def _build_right_panel(self) -> QWidget:
+        from PySide6.QtWidgets import QScrollArea
         w = QWidget()
-        w.setFixedWidth(260)
         layout = QVBoxLayout(w)
         layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
 
         title = QLabel("Propiedades")
         title.setFont(QFont("", 10, QFont.Weight.Bold))
@@ -234,7 +260,19 @@ class MainWindow(QMainWindow):
         grp_clip = QGroupBox("Cortes")
         vlay = QVBoxLayout(grp_clip)
 
-        vlay.addWidget(QLabel("Horizontal (Y):"))
+        # Y slider — Radial and Diámetro checkboxes
+        y_hdr = QHBoxLayout()
+        y_hdr.addWidget(QLabel("Horizontal (Y):"))
+        self._chk_y_radial = QCheckBox("Radial")
+        self._chk_y_radial.setChecked(False)
+        self._chk_y_radial.stateChanged.connect(self._on_y_checkbox_changed)
+        self._chk_y_diam = QCheckBox("Diámetro")
+        self._chk_y_diam.setChecked(False)
+        self._chk_y_diam.stateChanged.connect(self._on_y_checkbox_changed)
+        y_hdr.addStretch()
+        y_hdr.addWidget(self._chk_y_radial)
+        y_hdr.addWidget(self._chk_y_diam)
+        vlay.addLayout(y_hdr)
         self._slider_h = QSlider(Qt.Orientation.Horizontal)
         self._slider_h.setRange(0, 100)
         self._slider_h.setValue(100)
@@ -243,7 +281,15 @@ class MainWindow(QMainWindow):
         self._slider_h.valueChanged.connect(self._update_clips)
         vlay.addWidget(self._slider_h)
 
-        vlay.addWidget(QLabel("Vertical (X):"))
+        # X slider — Perfil checkbox
+        x_hdr = QHBoxLayout()
+        x_hdr.addWidget(QLabel("Vertical (X):"))
+        self._chk_x_profile = QCheckBox("Perfil")
+        self._chk_x_profile.setChecked(False)
+        self._chk_x_profile.stateChanged.connect(self._on_x_checkbox_changed)
+        x_hdr.addStretch()
+        x_hdr.addWidget(self._chk_x_profile)
+        vlay.addLayout(x_hdr)
         self._slider_v = QSlider(Qt.Orientation.Horizontal)
         self._slider_v.setRange(0, 100)
         self._slider_v.setValue(100)
@@ -260,8 +306,8 @@ class MainWindow(QMainWindow):
         sep4 = QFrame(); sep4.setFrameShape(QFrame.Shape.HLine)
         layout.addWidget(sep4)
 
-        # Measurements
-        grp_meas = QGroupBox("Mediciones (📏 M)")
+        # Measurements — distancias, diámetros y profundidades en una sola lista
+        grp_meas = QGroupBox("Mediciones (📏 M / 📐 P)")
         mlay = QVBoxLayout(grp_meas)
         self._meas_list = QLabel("—")
         self._meas_list.setWordWrap(True)
@@ -273,8 +319,71 @@ class MainWindow(QMainWindow):
         mlay.addWidget(btn_clear_meas)
         layout.addWidget(grp_meas)
 
-        layout.addStretch()
-        return w
+        sep5 = QFrame(); sep5.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(sep5)
+
+        grp_erase = QGroupBox("Borrar caras (✂ E)")
+        elay = QVBoxLayout(grp_erase)
+        self._lbl_erase_info = QLabel("Seleccionadas: 0 caras")
+        self._lbl_erase_info.setWordWrap(True)
+        elay.addWidget(self._lbl_erase_info)
+        erase_btns = QHBoxLayout()
+        self._btn_erase_apply  = QPushButton("✓ Aplicar")
+        self._btn_erase_cancel = QPushButton("✗ Cancelar")
+        self._btn_erase_apply.setEnabled(False)
+        self._btn_erase_cancel.setEnabled(False)
+        self._btn_erase_apply.clicked.connect(self._gl.commit_erase)
+        self._btn_erase_cancel.clicked.connect(self._gl.cancel_erase)
+        erase_btns.addWidget(self._btn_erase_apply)
+        erase_btns.addWidget(self._btn_erase_cancel)
+        elay.addLayout(erase_btns)
+        layout.addWidget(grp_erase)
+
+        sep6 = QFrame(); sep6.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(sep6)
+
+        # Radial comparison panel
+        from PySide6.QtWidgets import QRadioButton
+        grp_radial = QGroupBox("Comparación radial (📊 R)")
+        rlay = QVBoxLayout(grp_radial)
+        radio_row = QHBoxLayout()
+        self._radio_center = QRadioButton("Desde centro")
+        self._radio_wear   = QRadioButton("Entre crisoles")
+        self._radio_center.setChecked(True)
+        radio_row.addWidget(self._radio_center)
+        radio_row.addWidget(self._radio_wear)
+        rlay.addLayout(radio_row)
+        self._radio_center.toggled.connect(self._on_radial_center_toggled)
+        self._radio_wear.toggled.connect(self._on_radial_wear_toggled)
+        self._radial_list = QLabel("—")
+        self._radial_list.setWordWrap(True)
+        self._radial_list.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._radial_list.setMinimumHeight(80)
+        rlay.addWidget(self._radial_list)
+        layout.addWidget(grp_radial)
+
+        sep7 = QFrame(); sep7.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(sep7)
+
+        grp_profile = QGroupBox("Perfil horizontal (🔲) — slider X")
+        play = QVBoxLayout(grp_profile)
+        lbl_prof_hint = QLabel("Activa 'Perfil' en slider X para medir\nlíneas paralelas al plano de alineación.")
+        lbl_prof_hint.setWordWrap(True)
+        lbl_prof_hint.setStyleSheet("color: gray; font-size: 9px;")
+        play.addWidget(lbl_prof_hint)
+        self._profile_list = QLabel("—")
+        self._profile_list.setWordWrap(True)
+        self._profile_list.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._profile_list.setMinimumHeight(80)
+        play.addWidget(self._profile_list)
+        layout.addWidget(grp_profile)
+
+        scroll = QScrollArea()
+        scroll.setWidget(w)
+        scroll.setWidgetResizable(True)
+        scroll.setFixedWidth(290)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        return scroll
 
     def _build_menu(self):
         mb = self.menuBar()
@@ -361,8 +470,16 @@ class MainWindow(QMainWindow):
                                tip="Alinear esta malla usando los 3 puntos calibrados")
         self._act_measure = act("📏 Medir",        "M",  checkable=True,
                                tip="Medir distancia entre dos puntos (misma malla o entre dos mallas)")
+        self._act_measure_diam = act("⌀ Diámetro",   "D",  checkable=True,
+                               tip="Medir diámetro del horno en la altura del punto seleccionado")
         self._act_crop       = act("⭕ Recortar crisol", "C", checkable=True,
                                    tip="Seleccioná 3 puntos en el borde del crisol para recortar el exterior")
+        self._act_erase      = act("✂ Borrar caras",    "E", checkable=True,
+                                   tip="Pintá caras para borrarlas (rueda = tamaño del pincel, Enter = confirmar)")
+        self._act_depth      = act("📐 Profundidad",    "P", checkable=True,
+                                   tip="Seleccioná 3 puntos del borde y 1 punto del fondo para medir la profundidad del crisol")
+        self._act_radial     = act("📊 Radial",         "R", checkable=True,
+                                   tip="Comparación radial: 7 direcciones, 14 medidas entre ambos crisoles (requiere malla de referencia)")
         self._act_ref_volume = act("🫧 Volumen desgaste", None, checkable=True,
                                    tip="Mostrar referencia como sólido transparente para ver el volumen de material perdido")
         self._act_icp    = act("🎯 ICP tornillos", None,
@@ -383,7 +500,11 @@ class MainWindow(QMainWindow):
         tb.addAction(self._act_calib)
         tb.addAction(self._act_align)
         tb.addAction(self._act_measure)
+        tb.addAction(self._act_measure_diam)
         tb.addAction(self._act_crop)
+        tb.addAction(self._act_erase)
+        tb.addAction(self._act_depth)
+        tb.addAction(self._act_radial)
         tb.addSeparator()
         tb.addAction(self._act_ref_volume)
         tb.addAction(self._act_icp)
@@ -396,7 +517,11 @@ class MainWindow(QMainWindow):
         self._act_calib.triggered.connect(lambda: self._set_mode(Mode.CALIBRATE_3PT))
         self._act_align.triggered.connect(lambda: self._set_mode(Mode.ALIGN_3PT))
         self._act_measure.triggered.connect(lambda: self._set_mode(Mode.MEASURE))
+        self._act_measure_diam.triggered.connect(lambda: self._set_mode(Mode.MEASURE_DIAM))
         self._act_crop.triggered.connect(lambda: self._set_mode(Mode.CROP_CYLINDER))
+        self._act_erase.triggered.connect(lambda: self._set_mode(Mode.ERASE))
+        self._act_depth.triggered.connect(lambda: self._set_mode(Mode.MEASURE_DEPTH))
+        self._act_radial.triggered.connect(lambda: self._set_mode(Mode.COMPARE_RADIAL))
         self._act_ref_volume.toggled.connect(
             lambda on: self._gl.set_ref_mode("solid_transparent" if on else "wireframe")
         )
@@ -450,7 +575,16 @@ class MainWindow(QMainWindow):
         self._act_calib.setChecked(mode == Mode.CALIBRATE_3PT)
         self._act_align.setChecked(mode == Mode.ALIGN_3PT)
         self._act_measure.setChecked(mode == Mode.MEASURE)
+        self._act_measure_diam.setChecked(mode == Mode.MEASURE_DIAM)
         self._act_crop.setChecked(mode == Mode.CROP_CYLINDER)
+        self._act_erase.setChecked(mode == Mode.ERASE)
+        self._act_depth.setChecked(mode == Mode.MEASURE_DEPTH)
+        self._act_radial.setChecked(mode == Mode.COMPARE_RADIAL)
+        in_erase = (mode == Mode.ERASE)
+        self._btn_erase_cancel.setEnabled(in_erase)
+        self._btn_erase_apply.setEnabled(False)   # enabled only when faces are selected
+        if in_erase:
+            self._lbl_erase_info.setText("Seleccionadas: 0 caras")
         self._gl.set_mode(mode)
 
     # ── campaign slots ───────────────────────────────────────────────────────
@@ -588,10 +722,62 @@ class MainWindow(QMainWindow):
         h = self._slider_h.value() / 100.0
         v = self._slider_v.value() / 100.0
         self._gl.set_clip_planes(h, v)
+        if self._chk_y_radial.isChecked():
+            self._radial_timer.start()
+        if self._chk_y_diam.isChecked():
+            self._diam_timer.start()
+        if self._chk_x_profile.isChecked():
+            self._profile_timer.start()
+
+    def _on_y_checkbox_changed(self):
+        """Called when either Y-slider checkbox changes state."""
+        if self._chk_y_radial.isChecked():
+            self._radial_timer.start()
+        else:
+            self._gl._radial_scan = None
+            self._gl._refresh_measure_render()
+            self._radial_list.setText("—")
+        if self._chk_y_diam.isChecked():
+            self._diam_timer.start()
+        else:
+            self._gl.set_slider_diameter(None, None)
+
+    def _on_x_checkbox_changed(self):
+        """Called when the X-slider Perfil checkbox changes state."""
+        if self._chk_x_profile.isChecked():
+            self._profile_timer.start()
+        else:
+            self._gl._profile_scan = None
+            self._gl._refresh_measure_render()
+            self._profile_list.setText("—")
+
+    def _trigger_slider_diameter(self):
+        h = self._slider_h.value() / 100.0 if self._chk_y_diam.isChecked() else None
+        self._gl.set_slider_diameter(h, None)   # v=None: X slider no longer measures diameter
+
+    def _trigger_radial_scan(self):
+        if self._chk_y_radial.isChecked():
+            h = self._slider_h.value() / 100.0
+            self._gl.update_radial_from_slider(h)
+
+    def _trigger_profile_scan(self):
+        if self._chk_x_profile.isChecked():
+            v = self._slider_v.value() / 100.0
+            self._gl.update_profile_from_slider(v)
 
     def _reset_clips(self):
         self._slider_h.setValue(100)
         self._slider_v.setValue(100)
+        self._chk_y_radial.setChecked(False)
+        self._chk_y_diam.setChecked(False)
+        self._chk_x_profile.setChecked(False)
+        self._diam_timer.stop()
+        self._radial_timer.stop()
+        self._profile_timer.stop()
+        self._gl.set_slider_diameter(None, None)
+        self._gl._profile_scan = None
+        self._gl._refresh_measure_render()
+        self._profile_list.setText("—")
 
     # ── heatmap / comparison ─────────────────────────────────────────────────
 
@@ -1045,9 +1231,83 @@ class MainWindow(QMainWindow):
         self._meas_list.setText("\n".join(lines))
         self._status_main.setText(f"📏 Distancia #{n}: {m.label}")
 
+    def _on_diameter(self, dm):
+        """Called when a diameter measurement is complete."""
+        lines = self._meas_list.text().split("\n") if self._meas_list.text() != "—" else []
+        n = len(lines) + 1
+        lines.append(f"{n}:  {dm.label}")
+        self._meas_list.setText("\n".join(lines))
+        self._status_main.setText(f"⌀ Diámetro #{n}: {dm.label}")
+
+    def _on_depth(self, dm):
+        """Called when a depth measurement is complete."""
+        lines = self._meas_list.text().split("\n") if self._meas_list.text() != "—" else []
+        n = len(lines) + 1
+        lines.append(f"{n}:  {dm.label}")
+        self._meas_list.setText("\n".join(lines))
+        self._status_main.setText(f"📐 {dm.label}")
+
+    def _on_radial_center_toggled(self, checked: bool):
+        if checked:
+            self._gl.set_radial_wear_mode(False)
+
+    def _on_radial_wear_toggled(self, checked: bool):
+        if checked:
+            self._gl.set_radial_wear_mode(True)
+
+    def _on_radial_scan(self, scan):
+        """Called when a radial scan is computed."""
+        uf  = self._unit_factor
+        ud  = self._unit_decimals
+        us  = self._unit_suffix
+        fmt = lambda v: f"{v * uf:.{ud}f} {us}"
+        lines = []
+        for i, angle in enumerate(scan.angles_deg):
+            da  = fmt(scan.dists_a[i]) if scan.dists_a[i] > 0 else "—"
+            db  = fmt(scan.dists_b[i]) if scan.dists_b[i] > 0 else "—"
+            gap = fmt(scan.gaps[i])    if scan.gaps[i]    > 0 else "—"
+            lines.append(f"{angle:5.1f}°  A:{da}  B:{db}  Δ:{gap}")
+        self._radial_list.setText("\n".join(lines) if lines else "—")
+
+    def _on_profile_scan(self, scan):
+        """Called when a profile scan (X slider) is computed."""
+        uf  = self._unit_factor
+        ud  = self._unit_decimals
+        us  = self._unit_suffix
+        fmt = lambda v: f"{v * uf:.{ud}f}"
+        lines = []
+        for i, h in enumerate(scan.heights):
+            wa  = fmt(scan.widths_a[i])   if scan.widths_a[i]   > 0 else "—"
+            wb  = fmt(scan.widths_b[i])   if scan.widths_b[i]   > 0 else "—"
+            gl  = fmt(scan.gaps_left[i])  if scan.gaps_left[i]  > 0 else "—"
+            gr  = fmt(scan.gaps_right[i]) if scan.gaps_right[i] > 0 else "—"
+            lines.append(f"Y≈{h:.1f}  A:{wa}  B:{wb}  ΔL:{gl}  ΔR:{gr} {us}")
+        self._profile_list.setText("\n".join(lines) if lines else "—")
+
     def _clear_measurements(self):
         self._gl.clear_measurements()
         self._meas_list.setText("—")
+        self._radial_list.setText("—")
+        self._profile_list.setText("—")
+
+    def _on_erase_updated(self, count: int):
+        self._lbl_erase_info.setText(f"Seleccionadas: {count:,} caras")
+        self._btn_erase_apply.setEnabled(count > 0)
+
+    def _on_faces_erased(self, new_data):
+        idx = self._active_idx
+        if idx is not None:
+            self._mesh_cache[idx] = new_data
+            self._lbl_verts.setText(f"{new_data.vertex_count:,}")
+            self._lbl_faces.setText(f"{new_data.face_count:,}")
+            self._lbl_radius.setText(self._fmt(new_data.radius))
+            self._mark_dirty()
+        self._lbl_erase_info.setText("Seleccionadas: 0 caras")
+        self._btn_erase_apply.setEnabled(False)
+        self._set_mode(Mode.NAVIGATE)
+        self._status_main.setText(
+            f"✓ Borrado aplicado — {new_data.face_count:,} caras restantes"
+        )
 
     # ── project save / load ──────────────────────────────────────────────────
 

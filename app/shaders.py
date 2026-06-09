@@ -88,5 +88,17 @@ void main() {
 }
 """
 
+# For GL_LINES and GL_TRIANGLES: gl_PointCoord is undefined in GLSL 3.30,
+# so we use a flat shader without the circle discard.
+FLAT_FRAG = """
+#version 330 core
+in vec4 v_color;
+out vec4 frag_color;
+
+void main() {
+    frag_color = v_color;
+}
+"""
+
 # Pass-all plane: dot((0,0,0,1), (x,y,z,1)) = 1 > 0 always
 CLIP_PASS_ALL = (0.0, 0.0, 0.0, 1.0)

@@ -2,7 +2,7 @@ import ctypes
 import numpy as np
 from OpenGL import GL
 
-from app.shaders import MESH_VERT, MESH_FRAG, POINT_VERT, POINT_FRAG, CLIP_PASS_ALL
+from app.shaders import MESH_VERT, MESH_FRAG, POINT_VERT, POINT_FRAG, FLAT_FRAG, CLIP_PASS_ALL
 
 
 # ── shader helpers ──────────────────────────────────────────────────────────
@@ -250,9 +250,59 @@ class LinesObject:
         if self.vao is None or self.vertex_count < 2:
             return
         GL.glBindVertexArray(self.vao)
-        GL.glLineWidth(2.5)
+        try:
+            GL.glLineWidth(2.5)
+        except Exception:
+            pass
         GL.glDrawArrays(GL.GL_LINES, 0, self.vertex_count)
         GL.glLineWidth(1.0)
+        GL.glBindVertexArray(0)
+
+    def destroy(self):
+        if self.vbo:
+            GL.glDeleteBuffers(1, [self.vbo])
+        if self.vao:
+            GL.glDeleteVertexArrays(1, [self.vao])
+        self.vao = self.vbo = None
+        self.vertex_count = 0
+
+
+# ── cut-plane quad (semi-transparent filled triangles) ──────────────────────
+
+class CutPlaneObject:
+    """Renders filled triangles for the diameter cut plane (GL_TRIANGLES)."""
+
+    def __init__(self):
+        self.vao          = None
+        self.vbo          = None
+        self.vertex_count = 0
+
+    def upload(self, positions: np.ndarray, colors: np.ndarray):
+        N = len(positions)
+        self.vertex_count = N
+        if N == 0:
+            return
+        buf = np.zeros((N, 10), dtype=np.float32)
+        buf[:, 0:3]  = positions
+        buf[:, 6:10] = colors
+        if self.vao is None:
+            self.vao = GL.glGenVertexArrays(1)
+            self.vbo = GL.glGenBuffers(1)
+        GL.glBindVertexArray(self.vao)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, buf.nbytes, buf, GL.GL_DYNAMIC_DRAW)
+        s = 10 * 4
+        GL.glEnableVertexAttribArray(0)
+        GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, s, ctypes.c_void_p(0))
+        GL.glEnableVertexAttribArray(2)
+        GL.glVertexAttribPointer(2, 4, GL.GL_FLOAT, GL.GL_FALSE, s, ctypes.c_void_p(24))
+        GL.glBindVertexArray(0)
+
+    def draw(self):
+        if self.vao is None or self.vertex_count < 3:
+            return
+        GL.glBindVertexArray(self.vao)
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, self.vertex_count)
         GL.glBindVertexArray(0)
 
     def destroy(self):
@@ -275,11 +325,13 @@ class Renderer:
     def __init__(self):
         self.mesh_prog    = None
         self.point_prog   = None
+        self.flat_prog    = None   # for GL_LINES and GL_TRIANGLES (no circle discard)
         self.mesh_obj     = None
         self.mesh_obj_ref = None
         self.markers      = MarkersObject()
         self.meas_lines   = LinesObject()    # measurement line segments
         self.meas_markers = MarkersObject()  # measurement point markers
+        self.cut_plane    = CutPlaneObject() # diameter cut plane quad
         self._wireframe   = False
         self._clip_h      = _CLIP_PASS.copy()
         self._clip_v      = _CLIP_PASS.copy()
@@ -288,6 +340,7 @@ class Renderer:
     def initialize(self):
         self.mesh_prog  = _link(MESH_VERT, MESH_FRAG)
         self.point_prog = _link(POINT_VERT, POINT_FRAG)
+        self.flat_prog  = _link(POINT_VERT, FLAT_FRAG)
 
         GL.glEnable(GL.GL_DEPTH_TEST)
         GL.glDepthFunc(GL.GL_LEQUAL)
@@ -355,6 +408,13 @@ class Renderer:
         else:
             self.meas_markers.vertex_count = 0
 
+    def update_cut_plane(self, verts: np.ndarray, colors: np.ndarray):
+        """verts: (N, 3) triangle vertices (N multiple of 3); colors: (N, 4)."""
+        if len(verts) >= 3:
+            self.cut_plane.upload(verts, colors)
+        else:
+            self.cut_plane.vertex_count = 0
+
     # ── drawing ───────────────────────────────────────────────────────────────
 
     def draw(self, mvp: np.ndarray, cam_pos: np.ndarray,
@@ -396,27 +456,43 @@ class Renderer:
             self.mesh_obj.draw()
             GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
 
+        # ── cut plane (semi-transparent, with depth test, no depth write) ──
+        if self.cut_plane.vertex_count >= 3:
+            GL.glDepthMask(GL.GL_FALSE)
+            GL.glUseProgram(self.flat_prog)
+            set_mat4(self.flat_prog, "u_mvp", mvp)
+            set_vec4(self.flat_prog, "u_clip_h", CLIP_PASS_ALL)
+            set_vec4(self.flat_prog, "u_clip_v", CLIP_PASS_ALL)
+            self.cut_plane.draw()
+            GL.glDepthMask(GL.GL_TRUE)
+
         # ── always-on-top layer (markers, lines, measure points) ──
         GL.glDisable(GL.GL_DEPTH_TEST)
         GL.glDisable(0x3000)   # GL_CLIP_DISTANCE0
         GL.glDisable(0x3001)   # GL_CLIP_DISTANCE1
-        GL.glUseProgram(self.point_prog)
-        set_vec4(self.point_prog, "u_clip_h", CLIP_PASS_ALL)
-        set_vec4(self.point_prog, "u_clip_v", CLIP_PASS_ALL)
 
         if self.markers.vertex_count > 0:
+            GL.glUseProgram(self.point_prog)
             set_mat4 (self.point_prog, "u_mvp",       mvp)
+            set_vec4 (self.point_prog, "u_clip_h",    CLIP_PASS_ALL)
+            set_vec4 (self.point_prog, "u_clip_v",    CLIP_PASS_ALL)
             set_float(self.point_prog, "u_point_size", 18.0)
             self.markers.draw()
 
-        # Measurement lines (re-use point shader — gl_PointSize ignored for GL_LINES)
+        # Measurement lines — use flat_prog so gl_PointCoord discard doesn't apply
         if self.meas_lines.vertex_count >= 2:
-            set_mat4(self.point_prog, "u_mvp", mvp)
+            GL.glUseProgram(self.flat_prog)
+            set_mat4(self.flat_prog, "u_mvp",    mvp)
+            set_vec4(self.flat_prog, "u_clip_h", CLIP_PASS_ALL)
+            set_vec4(self.flat_prog, "u_clip_v", CLIP_PASS_ALL)
             self.meas_lines.draw()
 
-        # Measurement point markers
+        # Measurement point markers (GL_POINTS — keep circle discard for round shape)
         if self.meas_markers.vertex_count > 0:
+            GL.glUseProgram(self.point_prog)
             set_mat4 (self.point_prog, "u_mvp",       mvp)
+            set_vec4 (self.point_prog, "u_clip_h",    CLIP_PASS_ALL)
+            set_vec4 (self.point_prog, "u_clip_v",    CLIP_PASS_ALL)
             set_float(self.point_prog, "u_point_size", 14.0)
             self.meas_markers.draw()
 
@@ -450,3 +526,5 @@ class Renderer:
             GL.glDeleteProgram(self.mesh_prog)
         if self.point_prog:
             GL.glDeleteProgram(self.point_prog)
+        if self.flat_prog:
+            GL.glDeleteProgram(self.flat_prog)

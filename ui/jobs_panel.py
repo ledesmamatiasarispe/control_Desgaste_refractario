@@ -6,7 +6,7 @@ import threading
 from datetime import datetime
 from typing import Optional
 
-from PySide6.QtCore    import Qt, Signal, QTimer
+from PySide6.QtCore    import Qt, Signal, Slot, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QProgressBar, QSizePolicy, QFileDialog,
@@ -219,6 +219,7 @@ class JobsPanel(QWidget):
         except Exception:
             pass
 
+    @Slot(str)
     def _update_jobs(self, jobs_json: str):
         jobs = json.loads(jobs_json)
         if not jobs:
@@ -412,5 +413,6 @@ class JobsPanel(QWidget):
             from PySide6.QtCore import QMetaObject, Q_ARG
             QMetaObject.invokeMethod(self, "_set_status", Qt.QueuedConnection, Q_ARG(str, f"Error: {e}"))
 
+    @Slot(str)
     def _set_status(self, msg: str):
         self._lbl_status.setText(msg)
