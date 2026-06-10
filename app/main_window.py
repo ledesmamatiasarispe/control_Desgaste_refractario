@@ -90,12 +90,6 @@ class MainWindow(QMainWindow):
         self._start_embedded_server()
 
         from PySide6.QtCore import QTimer
-        # Debounce timer for live slider diameter measurement (X slider, Diámetro checkbox)
-        self._diam_timer = QTimer(self)
-        self._diam_timer.setSingleShot(True)
-        self._diam_timer.setInterval(120)
-        self._diam_timer.timeout.connect(self._trigger_slider_diameter)
-
         # Debounce timer for Y radial scan (always active with two meshes)
         self._radial_timer = QTimer(self)
         self._radial_timer.setSingleShot(True)
@@ -260,18 +254,14 @@ class MainWindow(QMainWindow):
         grp_clip = QGroupBox("Cortes")
         vlay = QVBoxLayout(grp_clip)
 
-        # Y slider — Radial and Diámetro checkboxes
+        # Y slider — Radial checkbox
         y_hdr = QHBoxLayout()
         y_hdr.addWidget(QLabel("Horizontal (Y):"))
         self._chk_y_radial = QCheckBox("Radial")
         self._chk_y_radial.setChecked(False)
         self._chk_y_radial.stateChanged.connect(self._on_y_checkbox_changed)
-        self._chk_y_diam = QCheckBox("Diámetro")
-        self._chk_y_diam.setChecked(False)
-        self._chk_y_diam.stateChanged.connect(self._on_y_checkbox_changed)
         y_hdr.addStretch()
         y_hdr.addWidget(self._chk_y_radial)
-        y_hdr.addWidget(self._chk_y_diam)
         vlay.addLayout(y_hdr)
         self._slider_h = QSlider(Qt.Orientation.Horizontal)
         self._slider_h.setRange(0, 100)
@@ -355,6 +345,29 @@ class MainWindow(QMainWindow):
         rlay.addLayout(radio_row)
         self._radio_center.toggled.connect(self._on_radial_center_toggled)
         self._radio_wear.toggled.connect(self._on_radial_wear_toggled)
+
+        # Cantidad de direcciones radiales
+        rad_n_row = QHBoxLayout()
+        self._lbl_radial_n = QLabel("Cantidad: 7")
+        rad_n_row.addWidget(self._lbl_radial_n)
+        rlay.addLayout(rad_n_row)
+        self._slider_radial_n = QSlider(Qt.Orientation.Horizontal)
+        self._slider_radial_n.setRange(1, 24)
+        self._slider_radial_n.setValue(7)
+        self._slider_radial_n.valueChanged.connect(self._on_radial_n_changed)
+        rlay.addWidget(self._slider_radial_n)
+
+        # Ángulo de rotación de las direcciones
+        rad_a_row = QHBoxLayout()
+        self._lbl_radial_angle = QLabel("Ángulo: 0°")
+        rad_a_row.addWidget(self._lbl_radial_angle)
+        rlay.addLayout(rad_a_row)
+        self._slider_radial_angle = QSlider(Qt.Orientation.Horizontal)
+        self._slider_radial_angle.setRange(0, 360)
+        self._slider_radial_angle.setValue(0)
+        self._slider_radial_angle.valueChanged.connect(self._on_radial_angle_changed)
+        rlay.addWidget(self._slider_radial_angle)
+
         self._radial_list = QLabel("—")
         self._radial_list.setWordWrap(True)
         self._radial_list.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -371,6 +384,29 @@ class MainWindow(QMainWindow):
         lbl_prof_hint.setWordWrap(True)
         lbl_prof_hint.setStyleSheet("color: gray; font-size: 9px;")
         play.addWidget(lbl_prof_hint)
+
+        # Cantidad de líneas de perfil
+        prof_n_row = QHBoxLayout()
+        self._lbl_profile_n = QLabel("Cantidad: 7")
+        prof_n_row.addWidget(self._lbl_profile_n)
+        play.addLayout(prof_n_row)
+        self._slider_profile_n = QSlider(Qt.Orientation.Horizontal)
+        self._slider_profile_n.setRange(3, 24)
+        self._slider_profile_n.setValue(7)
+        self._slider_profile_n.valueChanged.connect(self._on_profile_n_changed)
+        play.addWidget(self._slider_profile_n)
+
+        # Offset de las alturas de muestreo
+        prof_o_row = QHBoxLayout()
+        self._lbl_profile_offset = QLabel("Offset: 0%")
+        prof_o_row.addWidget(self._lbl_profile_offset)
+        play.addLayout(prof_o_row)
+        self._slider_profile_offset = QSlider(Qt.Orientation.Horizontal)
+        self._slider_profile_offset.setRange(-100, 100)
+        self._slider_profile_offset.setValue(0)
+        self._slider_profile_offset.valueChanged.connect(self._on_profile_offset_changed)
+        play.addWidget(self._slider_profile_offset)
+
         self._profile_list = QLabel("—")
         self._profile_list.setWordWrap(True)
         self._profile_list.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -724,23 +760,17 @@ class MainWindow(QMainWindow):
         self._gl.set_clip_planes(h, v)
         if self._chk_y_radial.isChecked():
             self._radial_timer.start()
-        if self._chk_y_diam.isChecked():
-            self._diam_timer.start()
         if self._chk_x_profile.isChecked():
             self._profile_timer.start()
 
     def _on_y_checkbox_changed(self):
-        """Called when either Y-slider checkbox changes state."""
+        """Called when the Y-slider Radial checkbox changes state."""
         if self._chk_y_radial.isChecked():
             self._radial_timer.start()
         else:
             self._gl._radial_scan = None
             self._gl._refresh_measure_render()
             self._radial_list.setText("—")
-        if self._chk_y_diam.isChecked():
-            self._diam_timer.start()
-        else:
-            self._gl.set_slider_diameter(None, None)
 
     def _on_x_checkbox_changed(self):
         """Called when the X-slider Perfil checkbox changes state."""
@@ -750,10 +780,6 @@ class MainWindow(QMainWindow):
             self._gl._profile_scan = None
             self._gl._refresh_measure_render()
             self._profile_list.setText("—")
-
-    def _trigger_slider_diameter(self):
-        h = self._slider_h.value() / 100.0 if self._chk_y_diam.isChecked() else None
-        self._gl.set_slider_diameter(h, None)   # v=None: X slider no longer measures diameter
 
     def _trigger_radial_scan(self):
         if self._chk_y_radial.isChecked():
@@ -765,19 +791,46 @@ class MainWindow(QMainWindow):
             v = self._slider_v.value() / 100.0
             self._gl.update_profile_from_slider(v)
 
+    def _on_radial_n_changed(self, val: int):
+        self._lbl_radial_n.setText(f"Cantidad: {val}")
+        self._gl.set_radial_count(val)
+        if self._chk_y_radial.isChecked():
+            self._radial_timer.start()
+
+    def _on_radial_angle_changed(self, val: int):
+        self._lbl_radial_angle.setText(f"Ángulo: {val}°")
+        self._gl.set_radial_angle_offset(val)
+        if self._chk_y_radial.isChecked():
+            self._radial_timer.start()
+
+    def _on_profile_n_changed(self, val: int):
+        self._lbl_profile_n.setText(f"Cantidad: {val}")
+        self._gl.set_profile_count(val)
+        if self._chk_x_profile.isChecked():
+            self._profile_timer.start()
+
+    def _on_profile_offset_changed(self, val: int):
+        self._lbl_profile_offset.setText(f"Offset: {val}%")
+        self._gl.set_profile_offset(val / 100.0)
+        if self._chk_x_profile.isChecked():
+            self._profile_timer.start()
+
     def _reset_clips(self):
         self._slider_h.setValue(100)
         self._slider_v.setValue(100)
         self._chk_y_radial.setChecked(False)
-        self._chk_y_diam.setChecked(False)
         self._chk_x_profile.setChecked(False)
-        self._diam_timer.stop()
         self._radial_timer.stop()
         self._profile_timer.stop()
-        self._gl.set_slider_diameter(None, None)
+        self._gl._radial_scan = None
         self._gl._profile_scan = None
         self._gl._refresh_measure_render()
+        self._radial_list.setText("—")
         self._profile_list.setText("—")
+        self._slider_radial_n.setValue(7)
+        self._slider_radial_angle.setValue(0)
+        self._slider_profile_n.setValue(7)
+        self._slider_profile_offset.setValue(0)
 
     # ── heatmap / comparison ─────────────────────────────────────────────────
 

@@ -123,16 +123,19 @@ class GLWidget(QOpenGLWidget):
         self._meas_pending: Optional[np.ndarray] = None  # first point waiting
         self._measurements: List[Measurement]          = []
         self._diam_measurements: List[DiameterMeasurement] = []
-        self._slider_diams:  List[DiameterMeasurement] = []  # live diameters from sliders
         self._depth_pending: List[np.ndarray]          = []  # pts accumulating for depth mode
         self._depth_measurements: List[DepthMeasurement] = []
 
         # Radial comparison state (Y slider)
         self._radial_scan:      Optional[RadialScan]  = None
         self._radial_show_wear: bool                  = False  # False=from center, True=between
+        self._radial_n:            int   = 7    # number of radial directions
+        self._radial_angle_offset: float = 0.0  # degrees, rotates the spokes
 
         # Profile scan state (X slider)
         self._profile_scan: Optional[ProfileScan] = None
+        self._profile_n:      int   = 7    # number of horizontal lines
+        self._profile_offset: float = 0.0  # fraction of line spacing, shifts heights
 
         # Erase state
         self._erase_pending: set           = set()    # face indices to delete
@@ -209,58 +212,27 @@ class GLWidget(QOpenGLWidget):
         self.doneCurrent()
         self.update()
 
-    def set_slider_diameter(self, h_frac: Optional[float], v_frac: Optional[float]):
-        """Compute live diameter measurements at the current clip-plane heights.
-
-        Pass None for either axis to disable measurement on that slider.
-        Mirrors the same world-coordinate math as set_clip_planes.
-        """
-        self._slider_diams.clear()
-
-        mesh = self._mesh_data
-        if mesh is None or mesh.faces is None:
-            self._refresh_measure_render()
-            return
-
-        all_v = mesh.vertices
-        ymin, ymax = float(all_v[:, 1].min()), float(all_v[:, 1].max())
-        xmin, xmax = float(all_v[:, 0].min()), float(all_v[:, 0].max())
-        cx = float(mesh.centroid[0])
-        cy = float(mesh.centroid[1])
-        cz = float(mesh.centroid[2])
-
-        if h_frac is not None:
-            pad_y = (ymax - ymin) * 0.01 + 1e-6
-            y_cut = (ymin - pad_y) + h_frac * (ymax - ymin + 2 * pad_y)
-            if ymin < y_cut < ymax:
-                pt = np.array([cx, y_cut, cz], dtype=np.float32)
-                dm = self._compute_diameter_at(pt)
-                if dm is not None:
-                    self._slider_diams.append(dm)
-
-        if v_frac is not None:
-            pad_x = (xmax - xmin) * 0.01 + 1e-6
-            x_cut = (xmin - pad_x) + v_frac * (xmax - xmin + 2 * pad_x)
-            if xmin < x_cut < xmax:
-                pt = np.array([x_cut, cy, cz], dtype=np.float32)
-                dm = self._compute_diameter_at(pt)
-                if dm is not None:
-                    self._slider_diams.append(dm)
-
-        self._refresh_measure_render()
-
     # ── radial comparison ────────────────────────────────────────────────────
+
+    def set_radial_count(self, n: int):
+        """Set the number of radial directions used by the radial scan."""
+        self._radial_n = max(1, int(n))
+
+    def set_radial_angle_offset(self, deg: float):
+        """Rotate the starting angle of the radial directions, in degrees."""
+        self._radial_angle_offset = float(deg) % 360.0
 
     def update_radial_from_slider(self, h_frac: float):
         """Recompute radial scan at the Y height of the horizontal clip slider.
 
-        Fires whenever two meshes are loaded, regardless of mode.
+        Fires whenever at least one mesh is loaded, regardless of mode.
         Uses the same coordinate math as set_clip_planes so the scan plane
         aligns exactly with the visible cut.
         """
-        if self._mesh_data is None or self._ref_data is None:
+        if self._mesh_data is None:
             return
-        all_v = np.concatenate([self._mesh_data.vertices, self._ref_data.vertices], axis=0)
+        meshes = [m for m in (self._mesh_data, self._ref_data) if m is not None]
+        all_v = np.concatenate([m.vertices for m in meshes], axis=0)
         ymin, ymax = float(all_v[:, 1].min()), float(all_v[:, 1].max())
         pad_y = (ymax - ymin) * 0.01 + 1e-6
         y_cut = float((ymin - pad_y) + h_frac * (ymax - ymin + 2 * pad_y))
@@ -271,10 +243,20 @@ class GLWidget(QOpenGLWidget):
             center = self._radial_scan.center.copy()
         else:
             ca = self._mesh_data.centroid.astype(np.float64)
-            cb = self._ref_data.centroid.astype(np.float64)
-            center = ((ca + cb) / 2).astype(np.float32)
+            if self._ref_data is not None:
+                cb = self._ref_data.centroid.astype(np.float64)
+                ca = (ca + cb) / 2
+            center = ca.astype(np.float32)
         center[1] = y_cut
         self._run_radial_scan(center)
+
+    def set_profile_count(self, n: int):
+        """Set the number of horizontal lines used by the profile scan."""
+        self._profile_n = max(3, int(n))
+
+    def set_profile_offset(self, frac: float):
+        """Shift the profile scan heights by a fraction of the line spacing."""
+        self._profile_offset = float(frac)
 
     def update_profile_from_slider(self, v_frac: float):
         """Compute horizontal profile scan at the X cut position of the vertical slider.
@@ -292,6 +274,10 @@ class GLWidget(QOpenGLWidget):
         x_cut = float((xmin - pad_x) + v_frac * (xmax - xmin + 2 * pad_x))
         margin = (xmax - xmin) * 0.03
         x_cut = float(np.clip(x_cut, xmin + margin, xmax - margin))
+        self._run_profile_scan(x_cut)
+
+    def _run_profile_scan(self, x_cut: float):
+        """Compute and store the profile scan at x=x_cut, then refresh and notify."""
         scan = self._compute_profile_scan(x_cut)
         if scan is None:
             return
@@ -318,10 +304,13 @@ class GLWidget(QOpenGLWidget):
         center_z = float(all_v[:, 2].mean())
         center = np.array([x_cut, center_y, center_z], dtype=np.float32)
 
-        N = 7
+        N = self._profile_n
         margin_y = (ymax - ymin) * 0.08
         y_range = ymax - ymin - 2 * margin_y
-        heights = [ymin + margin_y + i * y_range / max(N - 1, 1) for i in range(N)]
+        spacing = y_range / max(N - 1, 1)
+        offset = self._profile_offset * spacing
+        heights = [float(np.clip(ymin + margin_y + offset + i * spacing,
+                                  ymin + 1e-6, ymax - 1e-6)) for i in range(N)]
 
         def _z_extents_from_section(mesh, heights_list):
             """Return (starts, ends): lists of min/max Z per height, or None if missing."""
@@ -396,6 +385,39 @@ class GLWidget(QOpenGLWidget):
             gaps_left=gaps_left, gaps_right=gaps_right,
         )
 
+    def _resample_profile_wall(self, ps: 'ProfileScan', side: str, n_points: int = 40):
+        """Resample one wall (side='start'=−Z / left, side='end'=+Z / right) of the
+        profile scan onto n_points evenly-spaced heights via linear interpolation.
+
+        Returns (pts_a, pts_b) — lists of n_points 3D points each — or None if
+        there isn't enough valid data (fewer than 2 heights with both meshes hit).
+        """
+        hits_a = ps.hits_a_start if side == 'start' else ps.hits_a_end
+        hits_b = ps.hits_b_start if side == 'start' else ps.hits_b_end
+
+        heights = np.array(ps.heights, dtype=np.float64)
+        valid = np.array([a is not None and b is not None for a, b in zip(hits_a, hits_b)])
+        if int(valid.sum()) < 2:
+            return None
+
+        h_valid = heights[valid]
+        z_a = np.array([float(p[2]) for p, v in zip(hits_a, valid) if v], dtype=np.float64)
+        z_b = np.array([float(p[2]) for p, v in zip(hits_b, valid) if v], dtype=np.float64)
+
+        order = np.argsort(h_valid)
+        h_valid, z_a, z_b = h_valid[order], z_a[order], z_b[order]
+        if h_valid[0] == h_valid[-1]:
+            return None
+
+        targets = np.linspace(h_valid[0], h_valid[-1], n_points)
+        za_t = np.interp(targets, h_valid, z_a)
+        zb_t = np.interp(targets, h_valid, z_b)
+
+        x_cut = float(ps.x_cut)
+        pts_a = [np.array([x_cut, h, za], dtype=np.float32) for h, za in zip(targets, za_t)]
+        pts_b = [np.array([x_cut, h, zb], dtype=np.float32) for h, zb in zip(targets, zb_t)]
+        return pts_a, pts_b
+
     def set_radial_wear_mode(self, show_wear: bool):
         """Toggle between 'from center' (False) and 'between crucibles' (True) display.
         Applies to both the radial scan and the profile scan.
@@ -410,14 +432,16 @@ class GLWidget(QOpenGLWidget):
 
     def _run_radial_scan(self, center: Optional[np.ndarray] = None):
         """Compute radial scan; uses combined centroid of both meshes if center is None."""
-        if self._mesh_data is None or self._ref_data is None:
-            self.status_message.emit("Necesitás cargar dos crisoles para comparar radialmente")
+        if self._mesh_data is None:
+            self.status_message.emit("Necesitás cargar al menos un crisol para el escaneo radial")
             return
         if center is None:
             # Average of both centroids = better axis estimate than a single mesh centroid
             ca = self._mesh_data.centroid.astype(np.float64)
-            cb = self._ref_data.centroid.astype(np.float64)
-            center = ((ca + cb) / 2).astype(np.float32)
+            if self._ref_data is not None:
+                cb = self._ref_data.centroid.astype(np.float64)
+                ca = (ca + cb) / 2
+            center = ca.astype(np.float32)
         self.status_message.emit("Calculando escaneo radial…")
         scan = self._compute_radial_scan(center)
         if scan is None:
@@ -426,26 +450,31 @@ class GLWidget(QOpenGLWidget):
         self._radial_scan = scan
         self._refresh_measure_render()
         self.radial_scan_done.emit(scan)
-        n_ok = sum(1 for a, b in zip(scan.hits_a, scan.hits_b) if a is not None and b is not None)
+        n_ok = sum(1 for a in scan.hits_a if a is not None)
         self.status_message.emit(
-            f"Radial: {n_ok}/7 direcciones — clic en la malla para cambiar la altura del corte")
+            f"Radial: {n_ok}/{len(scan.angles_deg)} direcciones — "
+            f"clic en la malla para cambiar la altura del corte")
 
     def _compute_radial_scan(self, center: np.ndarray) -> Optional[RadialScan]:
-        """Ray-cast in 7 horizontal directions against both meshes.
+        """Ray-cast in N horizontal directions against one or both meshes.
 
         Shoots from far OUTSIDE inward to guarantee front-face hits regardless of
-        how mesh normals are oriented. Both hits are then sorted by distance from
-        center so hits_a = smaller (closer/less worn) and hits_b = larger (farther/more worn).
+        how mesh normals are oriented. When both meshes are loaded, hits are sorted
+        by distance from center so hits_a = smaller (closer/less worn) and
+        hits_b = larger (farther/more worn). With a single mesh, only hits_a is filled.
         """
-        if self._mesh_data is None or self._ref_data is None:
+        if self._mesh_data is None:
             return None
-        N = 7
-        angles_deg = [i * 360.0 / N for i in range(N)]
+        N = self._radial_n
+        angles_deg = [(self._radial_angle_offset + i * 360.0 / N) % 360.0 for i in range(N)]
         hits_a, hits_b, dists_a, dists_b, gaps = [], [], [], [], []
         orig = center.astype(np.float64)
 
         # Far enough to start outside both meshes in every direction
-        far = float(max(self._mesh_data.radius, self._ref_data.radius)) * 3.0
+        radii = [self._mesh_data.radius]
+        if self._ref_data is not None:
+            radii.append(self._ref_data.radius)
+        far = float(max(radii)) * 3.0
 
         for angle in angles_deg:
             rad = np.deg2rad(angle)
@@ -453,7 +482,7 @@ class GLWidget(QOpenGLWidget):
             # Shoot from outside toward center: guarantees hitting front faces
             origin_out = orig + direction * far
             r_m = ray_cast(origin_out, -direction, self._mesh_data)
-            r_r = ray_cast(origin_out, -direction, self._ref_data)
+            r_r = ray_cast(origin_out, -direction, self._ref_data) if self._ref_data is not None else None
 
             hm = r_m.hit_point.astype(np.float32) if r_m is not None else None
             hr = r_r.hit_point.astype(np.float32) if r_r is not None else None
@@ -502,7 +531,6 @@ class GLWidget(QOpenGLWidget):
     def clear_measurements(self):
         self._measurements.clear()
         self._diam_measurements.clear()
-        self._slider_diams.clear()
         self._depth_measurements.clear()
         self._depth_pending.clear()
         self._radial_scan  = None
@@ -618,7 +646,7 @@ class GLWidget(QOpenGLWidget):
 
         # ── measurement labels (only when there's something to show) ────────
         has_anything = (self._measurements or self._meas_pending is not None
-                        or self._diam_measurements or self._slider_diams
+                        or self._diam_measurements
                         or self._depth_measurements or self._radial_scan is not None
                         or self._profile_scan is not None)
         if not has_anything:
@@ -635,14 +663,11 @@ class GLWidget(QOpenGLWidget):
                 painter.setPen(QColor(255, 230, 0))
                 painter.drawText(sx - tw//2 + 3, sy - 2, m.label)
 
-        # Labels for each diameter spoke at 3/4 of the line
-        # user-clicked = red/orange  |  slider live = yellow-green/green
+        # Labels for each diameter spoke at 3/4 of the line (red/orange)
         small_font = QFont("Arial", 8)
-        tagged_diams = ([(dm, False) for dm in self._diam_measurements] +
-                        [(dm, True)  for dm in self._slider_diams])
-        for dm, is_slider in tagged_diams:
-            c_max   = QColor(230, 255, 50)  if is_slider else QColor(255, 50,  50)
-            c_other = QColor(80,  230, 100) if is_slider else QColor(255, 160, 0)
+        for dm in self._diam_measurements:
+            c_max   = QColor(255, 50,  50)
+            c_other = QColor(255, 160, 0)
             for k, (p1, p2, _val, lbl) in enumerate(dm.spokes):
                 pos = p1 + 0.75 * (p2 - p1)
                 sx, sy, vis = self._world_to_screen(pos, mvp)
@@ -682,7 +707,7 @@ class GLWidget(QOpenGLWidget):
         if self._radial_scan is not None:
             sc = self._radial_scan
             small_font = QFont("Arial", 8)
-            for i in range(7):
+            for i in range(len(sc.angles_deg)):
                 if not self._radial_show_wear:
                     # Labels at each hit point for both meshes
                     if sc.hits_a[i] is not None and sc.dists_a[i] > 0:
@@ -1096,20 +1121,14 @@ class GLWidget(QOpenGLWidget):
             mk_pts.extend([m.p1, m.p2])
             mk_col.extend([_YELLOW, _YELLOW])
 
-        # Color schemes: (ring, spoke, max_spoke, center_marker)
-        _SCHEME_USER   = ([1.0, 0.2,  1.0, 1.0],   # magenta ring
-                          [1.0, 0.55, 0.0, 1.0],   # orange spokes
-                          [1.0, 0.15, 0.15, 1.0],  # red max spoke
-                          [1.0, 0.15, 0.15, 1.0])  # red center
-        _SCHEME_SLIDER = ([0.2, 0.9,  0.9, 1.0],   # cyan ring
-                          [0.3, 0.9,  0.4, 1.0],   # green spokes
-                          [0.9, 1.0,  0.2, 1.0],   # yellow-green max spoke
-                          [0.9, 1.0,  0.2, 1.0])   # yellow-green center
+        # Color scheme: (ring, spoke, max_spoke, center_marker)
+        _SCHEME_USER = ([1.0, 0.2,  1.0, 1.0],   # magenta ring
+                         [1.0, 0.55, 0.0, 1.0],   # orange spokes
+                         [1.0, 0.15, 0.15, 1.0],  # red max spoke
+                         [1.0, 0.15, 0.15, 1.0])  # red center
 
-        tagged = ([(dm, _SCHEME_USER)   for dm in self._diam_measurements] +
-                  [(dm, _SCHEME_SLIDER) for dm in self._slider_diams])
-
-        for dm, scheme in tagged:
+        for dm in self._diam_measurements:
+            scheme = _SCHEME_USER
             c_ring, c_spoke, c_max, c_center = scheme
 
             # Fitted reference ring
@@ -1175,7 +1194,7 @@ class GLWidget(QOpenGLWidget):
             if not self._radial_show_wear:
                 # Mode 1: spokes from center to each surface + rings
                 mk_pts.append(sc.center); mk_col.append([1.0, 1.0, 1.0, 1.0])  # white center dot
-                for i in range(7):
+                for i in range(len(sc.angles_deg)):
                     if sc.hits_a[i] is not None:
                         seg_pts.extend([sc.center, sc.hits_a[i]])
                         seg_col.extend([_COL_A, _COL_A])
@@ -1190,10 +1209,11 @@ class GLWidget(QOpenGLWidget):
                     for k in range(len(valid)):
                         seg_pts.extend([valid[k], valid[(k + 1) % len(valid)]])
                         seg_col.extend([col, col])
-            else:
+            elif self._ref_data is not None:
                 # Mode 2: ONLY gap lines + outer ring of larger crucible
                 # (no center spokes — makes the difference visually clear)
-                for i in range(7):
+                # Nothing to compare with a single mesh, so this mode shows nothing.
+                for i in range(len(sc.angles_deg)):
                     ha, hb = sc.hits_a[i], sc.hits_b[i]
                     if ha is not None:
                         mk_pts.append(ha); mk_col.append(_COL_A)
@@ -1252,20 +1272,17 @@ class GLWidget(QOpenGLWidget):
 
         # Translucent planes: diameter cut planes + radial wear area
         _PLANE_USER   = [0.35, 0.65, 1.0, 0.18]
-        _PLANE_SLIDER = [0.20, 0.90, 0.55, 0.14]
         _PLANE_WEAR   = [0.90, 0.25, 0.10, 0.38]
         plane_parts, color_parts = [], []
         for dm in self._diam_measurements:
             plane_parts.append(dm.plane_verts)
             color_parts.append(np.tile(_PLANE_USER,   (len(dm.plane_verts), 1)).astype(np.float32))
-        for dm in self._slider_diams:
-            plane_parts.append(dm.plane_verts)
-            color_parts.append(np.tile(_PLANE_SLIDER, (len(dm.plane_verts), 1)).astype(np.float32))
         # Wear area filled polygon (only in wear-display mode)
         if self._radial_scan is not None and self._radial_show_wear:
             sc = self._radial_scan
-            for i in range(7):
-                j = (i + 1) % 7
+            n_dirs = len(sc.angles_deg)
+            for i in range(n_dirs):
+                j = (i + 1) % n_dirs
                 ha_i, hb_i = sc.hits_a[i], sc.hits_b[i]
                 ha_j, hb_j = sc.hits_a[j], sc.hits_b[j]
                 if all(h is not None for h in (ha_i, hb_i, ha_j, hb_j)):
@@ -1273,24 +1290,19 @@ class GLWidget(QOpenGLWidget):
                     plane_parts.append(tri)
                     color_parts.append(np.tile(_PLANE_WEAR, (6, 1)).astype(np.float32))
 
-        # Profile scan gap strips (filled between consecutive height rows in wear mode)
+        # Profile scan gap surface (filled between the two meshes in wear mode).
+        # Always resampled to a fixed number of points along Y so the surface
+        # stays smooth regardless of the "Cantidad" slider value.
         if self._profile_scan is not None and self._radial_show_wear:
             ps = self._profile_scan
-            for i in range(len(ps.heights) - 1):
-                ha_s_i, ha_e_i = ps.hits_a_start[i],     ps.hits_a_end[i]
-                hb_s_i, hb_e_i = ps.hits_b_start[i],     ps.hits_b_end[i]
-                ha_s_j, ha_e_j = ps.hits_a_start[i + 1], ps.hits_a_end[i + 1]
-                hb_s_j, hb_e_j = ps.hits_b_start[i + 1], ps.hits_b_end[i + 1]
-                # Left-side (−Z) gap strip
-                if all(h is not None for h in (ha_s_i, hb_s_i, ha_s_j, hb_s_j)):
-                    tri = np.array([ha_s_i, hb_s_i, ha_s_j,
-                                    hb_s_i, hb_s_j, ha_s_j], dtype=np.float32)
-                    plane_parts.append(tri)
-                    color_parts.append(np.tile(_PLANE_WEAR, (6, 1)).astype(np.float32))
-                # Right-side (+Z) gap strip
-                if all(h is not None for h in (ha_e_i, hb_e_i, ha_e_j, hb_e_j)):
-                    tri = np.array([ha_e_i, hb_e_i, ha_e_j,
-                                    hb_e_i, hb_e_j, ha_e_j], dtype=np.float32)
+            for side in ('start', 'end'):
+                ring = self._resample_profile_wall(ps, side, n_points=40)
+                if ring is None:
+                    continue
+                pts_a, pts_b = ring
+                for i in range(len(pts_a) - 1):
+                    tri = np.array([pts_a[i], pts_b[i], pts_a[i + 1],
+                                    pts_b[i], pts_b[i + 1], pts_a[i + 1]], dtype=np.float32)
                     plane_parts.append(tri)
                     color_parts.append(np.tile(_PLANE_WEAR, (6, 1)).astype(np.float32))
 
