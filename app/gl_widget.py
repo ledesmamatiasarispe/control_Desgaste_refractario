@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 from PySide6.QtCore    import Qt, Signal
@@ -65,6 +65,10 @@ class RadialScan:
     dists_a:    List[float]             # distances center→A per direction
     dists_b:    List[float]             # distances center→B per direction
     gaps:       List[float]             # |dist_a - dist_b| per direction
+    diam_main:      List[Optional[float]]                                  # diameter of main mesh along each axis
+    diam_ref:        List[Optional[float]]                                 # diameter of ref mesh along each axis
+    diam_main_pts:   List[Optional[Tuple[np.ndarray, np.ndarray]]]         # endpoints used for diam_main
+    diam_ref_pts:    List[Optional[Tuple[np.ndarray, np.ndarray]]]         # endpoints used for diam_ref
 
 
 @dataclass
@@ -129,6 +133,7 @@ class GLWidget(QOpenGLWidget):
         # Radial comparison state (Y slider)
         self._radial_scan:      Optional[RadialScan]  = None
         self._radial_show_wear: bool                  = False  # False=from center, True=between
+        self._radial_show_diam: bool                  = False  # in "from center": show diameters too
         self._radial_n:            int   = 7    # number of radial directions
         self._radial_angle_offset: float = 0.0  # degrees, rotates the spokes
 
@@ -430,6 +435,12 @@ class GLWidget(QOpenGLWidget):
             self.status_message.emit("📊 Desde centro: radio de cada crisol")
         self.repaint()
 
+    def set_radial_diam_mode(self, show_diam: bool):
+        """In 'from center' mode, also draw full diameters (chords through center)."""
+        self._radial_show_diam = show_diam
+        self._refresh_measure_render()
+        self.repaint()
+
     def _run_radial_scan(self, center: Optional[np.ndarray] = None):
         """Compute radial scan; uses combined centroid of both meshes if center is None."""
         if self._mesh_data is None:
@@ -468,6 +479,7 @@ class GLWidget(QOpenGLWidget):
         N = self._radial_n
         angles_deg = [(self._radial_angle_offset + i * 360.0 / N) % 360.0 for i in range(N)]
         hits_a, hits_b, dists_a, dists_b, gaps = [], [], [], [], []
+        diam_main, diam_ref, diam_main_pts, diam_ref_pts = [], [], [], []
         orig = center.astype(np.float64)
 
         # Far enough to start outside both meshes in every direction
@@ -481,11 +493,17 @@ class GLWidget(QOpenGLWidget):
             direction = np.array([np.sin(rad), 0.0, np.cos(rad)], dtype=np.float64)
             # Shoot from outside toward center: guarantees hitting front faces
             origin_out = orig + direction * far
+            origin_opp = orig - direction * far
             r_m = ray_cast(origin_out, -direction, self._mesh_data)
             r_r = ray_cast(origin_out, -direction, self._ref_data) if self._ref_data is not None else None
+            # Opposite side (angle + 180°), used to measure full diameters
+            r_m_opp = ray_cast(origin_opp, direction, self._mesh_data)
+            r_r_opp = ray_cast(origin_opp, direction, self._ref_data) if self._ref_data is not None else None
 
             hm = r_m.hit_point.astype(np.float32) if r_m is not None else None
             hr = r_r.hit_point.astype(np.float32) if r_r is not None else None
+            hm_opp = r_m_opp.hit_point.astype(np.float32) if r_m_opp is not None else None
+            hr_opp = r_r_opp.hit_point.astype(np.float32) if r_r_opp is not None else None
 
             dm = float(np.linalg.norm(hm - center)) if hm is not None else None
             dr = float(np.linalg.norm(hr - center)) if hr is not None else None
@@ -508,12 +526,28 @@ class GLWidget(QOpenGLWidget):
             dists_a.append(da); dists_b.append(db)
             gaps.append(gap)
 
+            if hm is not None and hm_opp is not None:
+                diam_main.append(float(np.linalg.norm(hm - hm_opp)))
+                diam_main_pts.append((hm, hm_opp))
+            else:
+                diam_main.append(None)
+                diam_main_pts.append(None)
+
+            if hr is not None and hr_opp is not None:
+                diam_ref.append(float(np.linalg.norm(hr - hr_opp)))
+                diam_ref_pts.append((hr, hr_opp))
+            else:
+                diam_ref.append(None)
+                diam_ref_pts.append(None)
+
         return RadialScan(
             center=center.astype(np.float32),
             angles_deg=angles_deg,
             hits_a=hits_a, hits_b=hits_b,
             dists_a=dists_a, dists_b=dists_b,
             gaps=gaps,
+            diam_main=diam_main, diam_ref=diam_ref,
+            diam_main_pts=diam_main_pts, diam_ref_pts=diam_ref_pts,
         )
 
     def _fit_combined(self):
@@ -709,25 +743,44 @@ class GLWidget(QOpenGLWidget):
             small_font = QFont("Arial", 8)
             for i in range(len(sc.angles_deg)):
                 if not self._radial_show_wear:
-                    # Labels at each hit point for both meshes
-                    if sc.hits_a[i] is not None and sc.dists_a[i] > 0:
-                        sx, sy, vis = self._world_to_screen(sc.hits_a[i], mvp)
-                        if vis:
-                            v = sc.dists_a[i] * self._unit_factor
-                            lbl = f"{v:.{self._unit_decimals}f}"
-                            painter.setFont(small_font)
-                            painter.setPen(QColor(255, 160, 60))
-                            painter.fillRect(sx + 4, sy - 14, 55, 16, QColor(0, 0, 0, 160))
-                            painter.drawText(sx + 5, sy - 2, lbl)
-                    if sc.hits_b[i] is not None and sc.dists_b[i] > 0:
-                        sx, sy, vis = self._world_to_screen(sc.hits_b[i], mvp)
-                        if vis:
-                            v = sc.dists_b[i] * self._unit_factor
-                            lbl = f"{v:.{self._unit_decimals}f}"
-                            painter.setFont(small_font)
-                            painter.setPen(QColor(80, 210, 255))
-                            painter.fillRect(sx + 4, sy - 14, 55, 16, QColor(0, 0, 0, 160))
-                            painter.drawText(sx + 5, sy - 2, lbl)
+                    if not self._radial_show_diam:
+                        # Labels at each hit point for both meshes (radius)
+                        if sc.hits_a[i] is not None and sc.dists_a[i] > 0:
+                            sx, sy, vis = self._world_to_screen(sc.hits_a[i], mvp)
+                            if vis:
+                                v = sc.dists_a[i] * self._unit_factor
+                                lbl = f"{v:.{self._unit_decimals}f}"
+                                painter.setFont(small_font)
+                                painter.setPen(QColor(255, 160, 60))
+                                painter.fillRect(sx + 4, sy - 14, 55, 16, QColor(0, 0, 0, 160))
+                                painter.drawText(sx + 5, sy - 2, lbl)
+                        if sc.hits_b[i] is not None and sc.dists_b[i] > 0:
+                            sx, sy, vis = self._world_to_screen(sc.hits_b[i], mvp)
+                            if vis:
+                                v = sc.dists_b[i] * self._unit_factor
+                                lbl = f"{v:.{self._unit_decimals}f}"
+                                painter.setFont(small_font)
+                                painter.setPen(QColor(80, 210, 255))
+                                painter.fillRect(sx + 4, sy - 14, 55, 16, QColor(0, 0, 0, 160))
+                                painter.drawText(sx + 5, sy - 2, lbl)
+                    else:
+                        # Diameter labels (full chord through center), at 3/4 of the line
+                        for pair, val, col in (
+                            (sc.diam_main_pts[i], sc.diam_main[i], QColor(0, 220, 100)),
+                            (sc.diam_ref_pts[i],  sc.diam_ref[i],  QColor(230, 0, 220)),
+                        ):
+                            if pair is None or val is None:
+                                continue
+                            pos = pair[0] + 0.75 * (pair[1] - pair[0])
+                            sx, sy, vis = self._world_to_screen(pos, mvp)
+                            if vis:
+                                v = val * self._unit_factor
+                                lbl = f"⌀ {v:.{self._unit_decimals}f}"
+                                tw = 80
+                                painter.setFont(small_font)
+                                painter.setPen(col)
+                                painter.fillRect(sx - tw//2, sy - 14, tw, 16, QColor(0, 0, 0, 160))
+                                painter.drawText(sx - tw//2 + 3, sy - 2, lbl)
                 else:
                     # Labels at midpoint of gap line
                     ha, hb = sc.hits_a[i], sc.hits_b[i]
@@ -1192,23 +1245,34 @@ class GLWidget(QOpenGLWidget):
             _COL_GAP = [1.0, 0.25, 0.1, 1.0]   # red    — gap line
 
             if not self._radial_show_wear:
-                # Mode 1: spokes from center to each surface + rings
-                mk_pts.append(sc.center); mk_col.append([1.0, 1.0, 1.0, 1.0])  # white center dot
-                for i in range(len(sc.angles_deg)):
-                    if sc.hits_a[i] is not None:
-                        seg_pts.extend([sc.center, sc.hits_a[i]])
-                        seg_col.extend([_COL_A, _COL_A])
-                        mk_pts.append(sc.hits_a[i]); mk_col.append(_COL_A)
-                    if sc.hits_b[i] is not None:
-                        seg_pts.extend([sc.center, sc.hits_b[i]])
-                        seg_col.extend([_COL_B, _COL_B])
-                        mk_pts.append(sc.hits_b[i]); mk_col.append(_COL_B)
+                if not self._radial_show_diam:
+                    # Mode 1: spokes from center to each surface
+                    mk_pts.append(sc.center); mk_col.append([1.0, 1.0, 1.0, 1.0])  # white center dot
+                    for i in range(len(sc.angles_deg)):
+                        if sc.hits_a[i] is not None:
+                            seg_pts.extend([sc.center, sc.hits_a[i]])
+                            seg_col.extend([_COL_A, _COL_A])
+                            mk_pts.append(sc.hits_a[i]); mk_col.append(_COL_A)
+                        if sc.hits_b[i] is not None:
+                            seg_pts.extend([sc.center, sc.hits_b[i]])
+                            seg_col.extend([_COL_B, _COL_B])
+                            mk_pts.append(sc.hits_b[i]); mk_col.append(_COL_B)
                 # Rings
                 for hits, col in ((sc.hits_a, _COL_A), (sc.hits_b, _COL_B)):
                     valid = [h for h in hits if h is not None]
                     for k in range(len(valid)):
                         seg_pts.extend([valid[k], valid[(k + 1) % len(valid)]])
                         seg_col.extend([col, col])
+                # Optional: full diameters (chords through center) per mesh,
+                # replacing the radius spokes/labels
+                if self._radial_show_diam:
+                    for pts, col in ((sc.diam_main_pts, _COL_A), (sc.diam_ref_pts, _COL_B)):
+                        for pair in pts:
+                            if pair is None:
+                                continue
+                            p1, p2 = pair
+                            seg_pts.extend([p1, p2])
+                            seg_col.extend([col, col])
             elif self._ref_data is not None:
                 # Mode 2: ONLY gap lines + outer ring of larger crucible
                 # (no center spokes — makes the difference visually clear)

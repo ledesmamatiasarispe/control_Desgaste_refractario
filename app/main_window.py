@@ -346,6 +346,11 @@ class MainWindow(QMainWindow):
         self._radio_center.toggled.connect(self._on_radial_center_toggled)
         self._radio_wear.toggled.connect(self._on_radial_wear_toggled)
 
+        # "Desde centro": opción extra para mostrar también los diámetros
+        self._chk_radial_diam = QCheckBox("Mostrar diámetros")
+        self._chk_radial_diam.toggled.connect(self._on_radial_diam_toggled)
+        rlay.addWidget(self._chk_radial_diam)
+
         # Cantidad de direcciones radiales
         rad_n_row = QHBoxLayout()
         self._lbl_radial_n = QLabel("Cantidad: 7")
@@ -831,6 +836,7 @@ class MainWindow(QMainWindow):
         self._slider_radial_angle.setValue(0)
         self._slider_profile_n.setValue(7)
         self._slider_profile_offset.setValue(0)
+        self._chk_radial_diam.setChecked(False)
 
     # ── heatmap / comparison ─────────────────────────────────────────────────
 
@@ -1303,10 +1309,16 @@ class MainWindow(QMainWindow):
     def _on_radial_center_toggled(self, checked: bool):
         if checked:
             self._gl.set_radial_wear_mode(False)
+        self._chk_radial_diam.setEnabled(checked)
 
     def _on_radial_wear_toggled(self, checked: bool):
         if checked:
             self._gl.set_radial_wear_mode(True)
+
+    def _on_radial_diam_toggled(self, checked: bool):
+        self._gl.set_radial_diam_mode(checked)
+        if self._gl._radial_scan is not None:
+            self._on_radial_scan(self._gl._radial_scan)
 
     def _on_radial_scan(self, scan):
         """Called when a radial scan is computed."""
@@ -1319,7 +1331,12 @@ class MainWindow(QMainWindow):
             da  = fmt(scan.dists_a[i]) if scan.dists_a[i] > 0 else "—"
             db  = fmt(scan.dists_b[i]) if scan.dists_b[i] > 0 else "—"
             gap = fmt(scan.gaps[i])    if scan.gaps[i]    > 0 else "—"
-            lines.append(f"{angle:5.1f}°  A:{da}  B:{db}  Δ:{gap}")
+            line = f"{angle:5.1f}°  A:{da}  B:{db}  Δ:{gap}"
+            if self._chk_radial_diam.isChecked():
+                dm = fmt(scan.diam_main[i]) if scan.diam_main[i] is not None else "—"
+                dr = fmt(scan.diam_ref[i])  if scan.diam_ref[i]  is not None else "—"
+                line += f"  ⌀A:{dm}  ⌀B:{dr}"
+            lines.append(line)
         self._radial_list.setText("\n".join(lines) if lines else "—")
 
     def _on_profile_scan(self, scan):
