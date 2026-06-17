@@ -541,7 +541,7 @@ class GLWidget(QOpenGLWidget):
                                      radius=self._mesh_data.radius * 0.55)
         vm = VolumeMeasurement(
             rim_pts=self._vol_last_rim or [], normal=normal,
-            fill_height=target_depth, fill_origin=fill_origin,
+            fill_height=surface_depth, fill_origin=fill_origin,
             fill_disk_pts=disk, below_tris=below_tris,
             volume_m3=v_m3, mass_kg=m_kg, mass_ton=m_ton, label=label,
         )
