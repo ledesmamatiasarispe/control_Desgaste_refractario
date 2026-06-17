@@ -6,7 +6,7 @@ watertight) scan meshes because it never relies on a closed-surface volume.
 """
 import numpy as np
 
-_LIQUID_IRON_DENSITY_KG_M3 = 7000.0   # kg / m³ at ~1 500 °C
+_LIQUID_IRON_DENSITY_KG_M3 = 7150.0   # kg / m³ at ~1 500 °C
 _MM3_PER_M3                = 1e9
 
 
