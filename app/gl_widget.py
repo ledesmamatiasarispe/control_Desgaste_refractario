@@ -497,21 +497,35 @@ class GLWidget(QOpenGLWidget):
         self._update_vol_from_fraction(fraction)
 
     def _update_vol_from_fraction(self, fraction: float):
-        """Recompute volume, red overlay and fill disk for the given fill fraction (0-1)."""
+        """Recompute volume, red overlay and fill disk for the given fill fraction (0-1).
+
+        fraction=1.0 → iron at the rim (full crucible)
+        fraction=0.0 → iron at the bottom (empty)
+        Iron fills from the bottom upward, so the iron surface sits at
+        (1-fraction)*full_depth below the rim.
+        """
         from core.volume import volume_from_profile, volume_mm3_to_m3, mass_kg, mass_ton
         fraction = max(0.0, min(1.0, fraction))
-        target_depth = fraction * self._vol_full_depth
 
-        vol_model = volume_from_profile(
-            self._vol_profile_depths, self._vol_profile_areas, target_depth)
+        # Depth of the iron surface below the rim (0 = at rim, full_depth = at bottom)
+        surface_depth = (1.0 - fraction) * self._vol_full_depth
+
+        # Volume = total minus the empty space above the iron surface
+        depths = self._vol_profile_depths
+        areas  = self._vol_profile_areas
+        total_vol = volume_from_profile(depths, areas, self._vol_full_depth)
+        empty_vol = volume_from_profile(depths, areas, surface_depth)
+        vol_model = max(0.0, total_vol - empty_vol)
+
         v_m3  = volume_mm3_to_m3(vol_model)
         m_kg  = mass_kg(v_m3)
         m_ton = mass_ton(v_m3)
         label = f"Vol: {v_m3:.4f} m³  |  {m_kg:,.0f} kg  |  {m_ton:.3f} tn"
 
         normal      = self._vol_rim_normal.astype(np.float32)
+        # Green disk sits at the iron surface level
         fill_origin = (self._vol_rim_centroid
-                       - self._vol_rim_normal.astype(np.float64) * target_depth
+                       - self._vol_rim_normal.astype(np.float64) * surface_depth
                        ).astype(np.float32)
 
         # Red overlay — faces entirely below fill plane
