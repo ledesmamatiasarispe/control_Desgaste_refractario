@@ -118,8 +118,8 @@ class GLWidget(QOpenGLWidget):
     depth_done           = Signal(object)           # DepthMeasurement
     radial_scan_done     = Signal(object)           # RadialScan
     profile_scan_done    = Signal(object)           # ProfileScan
-    volume_height_needed = Signal(object, object)   # rim_centroid (np), normal (np)
-    volume_done          = Signal(object)           # VolumeMeasurement
+    volume_profile_ready = Signal(object, object, float)  # centroid, normal, full_depth (display units)
+    volume_done          = Signal(object)                 # VolumeMeasurement
     status_message       = Signal(str)
 
     def __init__(self, parent=None):
@@ -148,10 +148,15 @@ class GLWidget(QOpenGLWidget):
         self._depth_measurements: List[DepthMeasurement] = []
 
         # Volume measurement state
-        self._vol_pending:      List[np.ndarray]          = []
-        self._vol_measurements: List[VolumeMeasurement]   = []
-        self._vol_last_rim:     Optional[List]            = None   # temp: [p1,p2,p3]
-        self._vol_last_normal:  Optional[np.ndarray]      = None   # temp: outward normal
+        self._vol_pending:        List[np.ndarray]        = []
+        self._vol_measurements:   List[VolumeMeasurement] = []
+        self._vol_last_rim:       Optional[List]          = None
+        self._vol_last_normal:    Optional[np.ndarray]    = None
+        self._vol_profile_depths: Optional[np.ndarray]   = None
+        self._vol_profile_areas:  Optional[np.ndarray]   = None
+        self._vol_rim_centroid:   Optional[np.ndarray]   = None
+        self._vol_rim_normal:     Optional[np.ndarray]   = None
+        self._vol_full_depth:     float                  = 0.0   # model units
 
         # Radial comparison state (Y slider)
         self._radial_scan:      Optional[RadialScan]  = None
@@ -485,61 +490,50 @@ class GLWidget(QOpenGLWidget):
             tris[i * 3 + 2] = ring[(i + 1) % n_pts]
         return tris
 
-    def complete_volume_measure(self, rim_centroid: np.ndarray, normal: np.ndarray,
-                                fill_height_display: float):
-        """Called by MainWindow after the user enters the fill height.
-
-        fill_height_display is in the current display units (mm by default).
-        Converts to model units, integrates cross-sections, stores the result.
-        """
-        from core.volume import compute_fill_volume, volume_mm3_to_m3, mass_kg, mass_ton
-        import trimesh as _trimesh
-        from PySide6.QtWidgets import QApplication
-
-        if self._mesh_data is None:
-            self.status_message.emit("Cargá una malla primero para medir el volumen")
+    def set_volume_fill_level(self, fraction: float):
+        """Called by the fill-level slider to update the volume in real time."""
+        if self._vol_profile_depths is None or self._mesh_data is None:
             return
+        self._update_vol_from_fraction(fraction)
 
-        fill_height_model = float(fill_height_display) / self._unit_factor
-        fill_origin = (rim_centroid - normal * fill_height_model).astype(np.float32)
+    def _update_vol_from_fraction(self, fraction: float):
+        """Recompute volume, red overlay and fill disk for the given fill fraction (0-1)."""
+        from core.volume import volume_from_profile, volume_mm3_to_m3, mass_kg, mass_ton
+        fraction = max(0.0, min(1.0, fraction))
+        target_depth = fraction * self._vol_full_depth
 
-        mesh_tm = _trimesh.Trimesh(
-            vertices=self._mesh_data.vertices,
-            faces=self._mesh_data.faces,
-            process=False,
-        )
+        vol_model = volume_from_profile(
+            self._vol_profile_depths, self._vol_profile_areas, target_depth)
+        v_m3  = volume_mm3_to_m3(vol_model)
+        m_kg  = mass_kg(v_m3)
+        m_ton = mass_ton(v_m3)
+        label = f"Vol: {v_m3:.4f} m³  |  {m_kg:,.0f} kg  |  {m_ton:.3f} tn"
 
-        self.status_message.emit("Calculando volumen… (puede tardar unos segundos)")
-        QApplication.processEvents()
+        normal      = self._vol_rim_normal.astype(np.float32)
+        fill_origin = (self._vol_rim_centroid
+                       - self._vol_rim_normal.astype(np.float64) * target_depth
+                       ).astype(np.float32)
 
-        vol_model = compute_fill_volume(mesh_tm, fill_origin, normal, n_slices=80)
-        v_m3   = volume_mm3_to_m3(vol_model)
-        m_kg   = mass_kg(v_m3)
-        m_ton  = mass_ton(v_m3)
-        label  = (f"Vol: {v_m3:.4f} m³  |  {m_kg:,.0f} kg  |  {m_ton:.3f} tn")
-
-        # Identify mesh triangles entirely below the fill plane for red overlay
-        verts = self._mesh_data.vertices.astype(np.float64)
-        faces = self._mesh_data.faces
-        n_unit = normal.astype(np.float64) / (np.linalg.norm(normal) + 1e-12)
-        dots   = (verts - fill_origin.astype(np.float64)) @ n_unit
-        below_mask = dots < 1e-6                          # True = below/at fill level
-        face_below = below_mask[faces].all(axis=1)        # all 3 verts below plane
+        # Red overlay — faces entirely below fill plane
+        verts  = self._mesh_data.vertices.astype(np.float64)
+        faces  = self._mesh_data.faces
+        n_unit = self._vol_rim_normal.astype(np.float64)
+        n_unit /= (np.linalg.norm(n_unit) + 1e-12)
+        dots       = (verts - fill_origin.astype(np.float64)) @ n_unit
+        face_below = (dots[faces] < 1e-6).all(axis=1)
         below_tris = verts[faces[face_below]].reshape(-1, 3).astype(np.float32)
 
-        rim = self._vol_last_rim or []
         disk = self._make_disk_verts(fill_origin, normal,
                                      radius=self._mesh_data.radius * 0.55)
         vm = VolumeMeasurement(
-            rim_pts=rim, normal=normal,
-            fill_height=fill_height_model, fill_origin=fill_origin,
+            rim_pts=self._vol_last_rim or [], normal=normal,
+            fill_height=target_depth, fill_origin=fill_origin,
             fill_disk_pts=disk, below_tris=below_tris,
             volume_m3=v_m3, mass_kg=m_kg, mass_ton=m_ton, label=label,
         )
-        self._vol_measurements.append(vm)
+        self._vol_measurements = [vm]
         self._refresh_measure_render()
         self.volume_done.emit(vm)
-        self.status_message.emit(f"{label}  — clic para otra medición")
 
     def _run_radial_scan(self, center: Optional[np.ndarray] = None):
         """Compute radial scan; uses combined centroid of both meshes if center is None."""
@@ -669,7 +663,10 @@ class GLWidget(QOpenGLWidget):
         self._depth_pending.clear()
         self._vol_measurements.clear()
         self._vol_pending.clear()
-        self._vol_last_rim = self._vol_last_normal = None
+        self._vol_last_rim     = self._vol_last_normal  = None
+        self._vol_rim_centroid = self._vol_rim_normal   = None
+        self._vol_profile_depths = self._vol_profile_areas = None
+        self._vol_full_depth   = 0.0
         self._radial_scan  = None
         self._profile_scan = None
         self._meas_pending = None
@@ -1155,11 +1152,42 @@ class GLWidget(QOpenGLWidget):
                     toward_interior = self._mesh_data.centroid - rim_centroid
                     if float(np.dot(toward_interior, normal)) > 0:
                         normal = -normal
-                self._vol_last_rim    = [p1, p2, p3]
-                self._vol_last_normal = normal
+                self._vol_last_rim     = [p1, p2, p3]
+                self._vol_last_normal  = normal
+                self._vol_rim_centroid = rim_centroid
+                self._vol_rim_normal   = normal
                 self._vol_pending.clear()
-                self.status_message.emit("Volumen — ingresá la altura máxima del crisol en el cuadro de diálogo")
-                self.volume_height_needed.emit(rim_centroid, normal)
+
+                from core.volume import compute_section_profile
+                import trimesh as _trimesh
+                from PySide6.QtWidgets import QApplication
+
+                mesh_tm = _trimesh.Trimesh(
+                    vertices=self._mesh_data.vertices,
+                    faces=self._mesh_data.faces,
+                    process=False,
+                )
+                n_unit = normal.astype(np.float64) / (np.linalg.norm(normal) + 1e-12)
+                vdots  = (self._mesh_data.vertices.astype(np.float64)
+                          - rim_centroid.astype(np.float64)) @ n_unit
+                below_v = vdots < 1e-6
+                if not below_v.any():
+                    self.status_message.emit("No hay geometría debajo del plano del borde seleccionado")
+                    return
+                self._vol_full_depth = float(-vdots[below_v].min())
+
+                self.status_message.emit("Calculando perfil de secciones…")
+                QApplication.processEvents()
+
+                depths, areas = compute_section_profile(
+                    mesh_tm, rim_centroid, normal, n_slices=100)
+                self._vol_profile_depths = depths
+                self._vol_profile_areas  = areas
+
+                self._update_vol_from_fraction(1.0)
+                self.volume_profile_ready.emit(
+                    rim_centroid, normal, self._vol_full_depth * self._unit_factor)
+                self.status_message.emit("Usá el slider para ajustar el nivel de llenado")
 
         elif self._mode == Mode.COMPARE_RADIAL:
             # Click changes the Y height of the scan plane; keep XZ from existing center

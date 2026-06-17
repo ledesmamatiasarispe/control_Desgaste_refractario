@@ -62,6 +62,62 @@ def compute_fill_volume(mesh_tm,
     return float(np.trapz(areas, depths))
 
 
+def compute_section_profile(mesh_tm,
+                            fill_origin: np.ndarray,
+                            fill_normal: np.ndarray,
+                            n_slices: int = 100):
+    """Pre-compute cross-section areas along the full mesh height.
+
+    Returns (depths, areas) arrays where depths[i] is the distance below
+    fill_origin and areas[i] is the cross-sectional area at that depth.
+    Used by the interactive fill-level slider for instant volume updates.
+    """
+    normal = np.asarray(fill_normal, dtype=np.float64)
+    norm_len = np.linalg.norm(normal)
+    if norm_len < 1e-12:
+        return np.array([0.0]), np.array([0.0])
+    normal /= norm_len
+    origin = np.asarray(fill_origin, dtype=np.float64)
+
+    dots = (mesh_tm.vertices.astype(np.float64) - origin) @ normal
+    below = dots < 1e-6
+    if not below.any():
+        return np.array([0.0]), np.array([0.0])
+
+    max_depth = float(-dots[below].min())
+    if max_depth < 1e-12:
+        return np.array([0.0]), np.array([0.0])
+
+    depths = np.linspace(0.0, max_depth, n_slices + 1)
+    areas  = []
+    for d in depths:
+        slice_pt = origin - normal * d
+        try:
+            section = mesh_tm.section(plane_origin=slice_pt, plane_normal=normal)
+            if section is None or len(section.entities) == 0:
+                areas.append(0.0)
+                continue
+            path2d, _ = section.to_2D()
+            areas.append(max(0.0, float(path2d.area)))
+        except Exception:
+            areas.append(0.0)
+
+    return depths, np.array(areas)
+
+
+def volume_from_profile(depths: np.ndarray, areas: np.ndarray,
+                        target_depth: float) -> float:
+    """Integrate a pre-computed section profile up to target_depth. Instant."""
+    if target_depth <= 0.0 or len(depths) < 2:
+        return 0.0
+    target_depth = min(target_depth, float(depths[-1]))
+    idx = int(np.searchsorted(depths, target_depth))
+    idx = min(idx, len(depths) - 1)
+    d_sub = np.append(depths[:idx], target_depth)
+    a_sub = np.append(areas[:idx], float(np.interp(target_depth, depths, areas)))
+    return float(np.trapz(a_sub, d_sub))
+
+
 # ── unit conversions ──────────────────────────────────────────────────────────
 
 def volume_mm3_to_m3(vol_mm3: float) -> float:

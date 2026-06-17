@@ -142,7 +142,7 @@ class MainWindow(QMainWindow):
         self._gl.depth_done.connect(self._on_depth)
         self._gl.radial_scan_done.connect(self._on_radial_scan)
         self._gl.profile_scan_done.connect(self._on_profile_scan)
-        self._gl.volume_height_needed.connect(self._on_volume_height_needed)
+        self._gl.volume_profile_ready.connect(self._on_volume_profile_ready)
         self._gl.volume_done.connect(self._on_volume_done)
 
         # Right panel
@@ -301,10 +301,25 @@ class MainWindow(QMainWindow):
         # Volume measurement results
         grp_vol = QGroupBox("Volumen de trabajo (⚗ V)")
         vlay = QVBoxLayout(grp_vol)
+
+        from PySide6.QtWidgets import QSlider
+        self._vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self._vol_slider.setRange(0, 1000)
+        self._vol_slider.setValue(1000)
+        self._vol_slider.setToolTip("Nivel de llenado (0 = vacío, 100% = borde)")
+        self._vol_slider.setVisible(False)
+        self._vol_slider.valueChanged.connect(self._on_vol_slider_changed)
+        self._vol_depth_label = QLabel("")
+        self._vol_depth_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._vol_depth_label.setVisible(False)
+        self._vol_full_depth_display: float = 0.0
+        vlay.addWidget(self._vol_slider)
+        vlay.addWidget(self._vol_depth_label)
+
         self._vol_list = QLabel("—")
         self._vol_list.setWordWrap(True)
         self._vol_list.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._vol_list.setMinimumHeight(55)
+        self._vol_list.setMinimumHeight(40)
         vlay.addWidget(self._vol_list)
         layout.addWidget(grp_vol)
 
@@ -1326,32 +1341,27 @@ class MainWindow(QMainWindow):
         self._meas_list.setText("\n".join(lines))
         self._status_main.setText(f"📐 {dm.label}")
 
-    def _on_volume_height_needed(self, rim_centroid, normal):
-        """Show input dialog to get fill height, then trigger volume computation."""
-        from PySide6.QtWidgets import QInputDialog
-        suffix = self._unit_suffix
-        val, ok = QInputDialog.getDouble(
-            self,
-            "Altura máxima del crisol",
-            f"Altura máxima de llenado ({suffix}):",
-            500.0 / self._unit_factor,   # default 500 mm in display units
-            1.0,
-            100000.0,
-            self._unit_decimals,
+    def _on_volume_profile_ready(self, rim_centroid, normal, full_depth_display):
+        """Profile computed — show the fill-level slider."""
+        self._vol_full_depth_display = float(full_depth_display)
+        self._vol_slider.setValue(1000)
+        self._vol_slider.setVisible(True)
+        self._vol_depth_label.setVisible(True)
+        self._on_vol_slider_changed(1000)
+
+    def _on_vol_slider_changed(self, val: int):
+        fraction = val / 1000.0
+        depth    = fraction * self._vol_full_depth_display
+        pct      = val / 10.0
+        self._vol_depth_label.setText(
+            f"Nivel: {depth:.{self._unit_decimals}f} {self._unit_suffix}  ({pct:.0f}%)"
         )
-        if not ok:
-            self._gl.status_message.emit("Medición de volumen cancelada")
-            return
-        self._gl.complete_volume_measure(rim_centroid, normal, val)
+        self._gl.set_volume_fill_level(fraction)
 
     def _on_volume_done(self, vm):
-        """Display volume result in the right panel."""
-        lines = self._vol_list.text().split("\n") if self._vol_list.text() != "—" else []
-        n = len(lines) + 1
-        lines.append(
-            f"{n}:  {vm.volume_m3:.4f} m³  |  {vm.mass_kg:,.0f} kg  |  {vm.mass_ton:.3f} tn"
+        self._vol_list.setText(
+            f"{vm.volume_m3:.4f} m³  |  {vm.mass_kg:,.0f} kg  |  {vm.mass_ton:.3f} tn"
         )
-        self._vol_list.setText("\n".join(lines))
         self._status_main.setText(f"⚗ {vm.label}")
 
     def _on_radial_center_toggled(self, checked: bool):
@@ -1408,6 +1418,9 @@ class MainWindow(QMainWindow):
         self._radial_list.setText("—")
         self._profile_list.setText("—")
         self._vol_list.setText("—")
+        self._vol_slider.setVisible(False)
+        self._vol_depth_label.setVisible(False)
+        self._vol_full_depth_display = 0.0
 
     def _on_erase_updated(self, count: int):
         self._lbl_erase_info.setText(f"Seleccionadas: {count:,} caras")
