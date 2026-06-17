@@ -1334,10 +1334,10 @@ class MainWindow(QMainWindow):
             self,
             "Altura máxima del crisol",
             f"Altura máxima de llenado ({suffix}):",
-            value=500.0 / self._unit_factor,   # default 500 mm in display units
-            min=1.0,
-            max=100000.0,
-            decimals=self._unit_decimals,
+            500.0 / self._unit_factor,   # default 500 mm in display units
+            1.0,
+            100000.0,
+            self._unit_decimals,
         )
         if not ok:
             self._gl.status_message.emit("Medición de volumen cancelada")
