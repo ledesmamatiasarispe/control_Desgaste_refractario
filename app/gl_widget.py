@@ -63,6 +63,7 @@ class VolumeMeasurement:
     fill_height:    float        # depth from rim plane to fill level (model units)
     fill_origin:    np.ndarray   # 3D centre of the fill-level plane
     fill_disk_pts:  np.ndarray   # (N*3, 3) — fan triangles for the translucent disk
+    below_tris:     np.ndarray   # (M*3, 3) — mesh triangles below fill plane (red overlay)
     volume_m3:      float
     mass_kg:        float
     mass_ton:       float
@@ -517,13 +518,22 @@ class GLWidget(QOpenGLWidget):
         m_ton  = mass_ton(v_m3)
         label  = (f"Vol: {v_m3:.4f} m³  |  {m_kg:,.0f} kg  |  {m_ton:.3f} tn")
 
+        # Identify mesh triangles entirely below the fill plane for red overlay
+        verts = self._mesh_data.vertices.astype(np.float64)
+        faces = self._mesh_data.faces
+        n_unit = normal.astype(np.float64) / (np.linalg.norm(normal) + 1e-12)
+        dots   = (verts - fill_origin.astype(np.float64)) @ n_unit
+        below_mask = dots < 1e-6                          # True = below/at fill level
+        face_below = below_mask[faces].all(axis=1)        # all 3 verts below plane
+        below_tris = verts[faces[face_below]].reshape(-1, 3).astype(np.float32)
+
         rim = self._vol_last_rim or []
         disk = self._make_disk_verts(fill_origin, normal,
                                      radius=self._mesh_data.radius * 0.55)
         vm = VolumeMeasurement(
             rim_pts=rim, normal=normal,
             fill_height=fill_height_model, fill_origin=fill_origin,
-            fill_disk_pts=disk,
+            fill_disk_pts=disk, below_tris=below_tris,
             volume_m3=v_m3, mass_kg=m_kg, mass_ton=m_ton, label=label,
         )
         self._vol_measurements.append(vm)
@@ -1499,12 +1509,17 @@ class GLWidget(QOpenGLWidget):
         for dm in self._diam_measurements:
             plane_parts.append(dm.plane_verts)
             color_parts.append(np.tile(_PLANE_USER,   (len(dm.plane_verts), 1)).astype(np.float32))
-        # Volume fill-level disks
-        _PLANE_FILL = [0.15, 0.75, 0.35, 0.28]   # semi-transparent green
+        # Volume fill-level disks + red overlay of mesh below fill plane
+        _PLANE_FILL  = [0.15, 0.75, 0.35, 0.28]   # semi-transparent green
+        _PLANE_BELOW = [1.00, 0.12, 0.08, 0.45]   # semi-transparent red
         for vm in self._vol_measurements:
             plane_parts.append(vm.fill_disk_pts)
             color_parts.append(np.tile(_PLANE_FILL,
                                        (len(vm.fill_disk_pts), 1)).astype(np.float32))
+            if len(vm.below_tris) > 0:
+                plane_parts.append(vm.below_tris)
+                color_parts.append(np.tile(_PLANE_BELOW,
+                                           (len(vm.below_tris), 1)).astype(np.float32))
         # Wear area filled polygon (only in wear-display mode)
         if self._radial_scan is not None and self._radial_show_wear:
             sc = self._radial_scan
