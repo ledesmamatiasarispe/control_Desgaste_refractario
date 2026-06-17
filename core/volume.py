@@ -106,7 +106,18 @@ def compute_section_profile(mesh_tm,
         except Exception:
             areas.append(0.0)
 
-    return depths, np.array(areas), valid
+    areas_np = np.array(areas)
+
+    # Leading zeros: the plane clips the mesh edge and returns no section.
+    # Extrapolate the first valid area upward so the top portion contributes
+    # correctly to the integral instead of silently dropping to zero.
+    nonzero = np.where(areas_np > 0)[0]
+    if nonzero.size > 0:
+        first = int(nonzero[0])
+        if first > 0:
+            areas_np[:first] = areas_np[first]
+
+    return depths, areas_np, valid
 
 
 def volume_from_profile(depths: np.ndarray, areas: np.ndarray,
