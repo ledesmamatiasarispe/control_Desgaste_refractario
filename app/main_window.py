@@ -142,6 +142,8 @@ class MainWindow(QMainWindow):
         self._gl.depth_done.connect(self._on_depth)
         self._gl.radial_scan_done.connect(self._on_radial_scan)
         self._gl.profile_scan_done.connect(self._on_profile_scan)
+        self._gl.volume_height_needed.connect(self._on_volume_height_needed)
+        self._gl.volume_done.connect(self._on_volume_done)
 
         # Right panel
         right = self._build_right_panel()
@@ -295,6 +297,19 @@ class MainWindow(QMainWindow):
 
         sep4 = QFrame(); sep4.setFrameShape(QFrame.Shape.HLine)
         layout.addWidget(sep4)
+
+        # Volume measurement results
+        grp_vol = QGroupBox("Volumen de trabajo (⚗ V)")
+        vlay = QVBoxLayout(grp_vol)
+        self._vol_list = QLabel("—")
+        self._vol_list.setWordWrap(True)
+        self._vol_list.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._vol_list.setMinimumHeight(55)
+        vlay.addWidget(self._vol_list)
+        layout.addWidget(grp_vol)
+
+        sep4b = QFrame(); sep4b.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(sep4b)
 
         # Measurements — distancias, diámetros y profundidades en una sola lista
         grp_meas = QGroupBox("Mediciones (📏 M / 📐 P)")
@@ -519,6 +534,8 @@ class MainWindow(QMainWindow):
                                    tip="Pintá caras para borrarlas (rueda = tamaño del pincel, Enter = confirmar)")
         self._act_depth      = act("📐 Profundidad",    "P", checkable=True,
                                    tip="Seleccioná 3 puntos del borde y 1 punto del fondo para medir la profundidad del crisol")
+        self._act_volume     = act("⚗ Volumen",        "V", checkable=True,
+                                   tip="Seleccioná 3 puntos del borde del crisol y una altura para calcular el volumen de hierro líquido")
         self._act_radial     = act("📊 Radial",         "R", checkable=True,
                                    tip="Comparación radial: 7 direcciones, 14 medidas entre ambos crisoles (requiere malla de referencia)")
         self._act_ref_volume = act("🫧 Volumen desgaste", None, checkable=True,
@@ -545,6 +562,7 @@ class MainWindow(QMainWindow):
         tb.addAction(self._act_crop)
         tb.addAction(self._act_erase)
         tb.addAction(self._act_depth)
+        tb.addAction(self._act_volume)
         tb.addAction(self._act_radial)
         tb.addSeparator()
         tb.addAction(self._act_ref_volume)
@@ -562,6 +580,7 @@ class MainWindow(QMainWindow):
         self._act_crop.triggered.connect(lambda: self._set_mode(Mode.CROP_CYLINDER))
         self._act_erase.triggered.connect(lambda: self._set_mode(Mode.ERASE))
         self._act_depth.triggered.connect(lambda: self._set_mode(Mode.MEASURE_DEPTH))
+        self._act_volume.triggered.connect(lambda: self._set_mode(Mode.MEASURE_VOLUME))
         self._act_radial.triggered.connect(lambda: self._set_mode(Mode.COMPARE_RADIAL))
         self._act_ref_volume.toggled.connect(
             lambda on: self._gl.set_ref_mode("solid_transparent" if on else "wireframe")
@@ -620,6 +639,7 @@ class MainWindow(QMainWindow):
         self._act_crop.setChecked(mode == Mode.CROP_CYLINDER)
         self._act_erase.setChecked(mode == Mode.ERASE)
         self._act_depth.setChecked(mode == Mode.MEASURE_DEPTH)
+        self._act_volume.setChecked(mode == Mode.MEASURE_VOLUME)
         self._act_radial.setChecked(mode == Mode.COMPARE_RADIAL)
         in_erase = (mode == Mode.ERASE)
         self._btn_erase_cancel.setEnabled(in_erase)
@@ -1306,6 +1326,34 @@ class MainWindow(QMainWindow):
         self._meas_list.setText("\n".join(lines))
         self._status_main.setText(f"📐 {dm.label}")
 
+    def _on_volume_height_needed(self, rim_centroid, normal):
+        """Show input dialog to get fill height, then trigger volume computation."""
+        from PySide6.QtWidgets import QInputDialog
+        suffix = self._unit_suffix
+        val, ok = QInputDialog.getDouble(
+            self,
+            "Altura máxima del crisol",
+            f"Altura máxima de llenado ({suffix}):",
+            value=500.0 / self._unit_factor,   # default 500 mm in display units
+            min=1.0,
+            max=100000.0,
+            decimals=self._unit_decimals,
+        )
+        if not ok:
+            self._gl.status_message.emit("Medición de volumen cancelada")
+            return
+        self._gl.complete_volume_measure(rim_centroid, normal, val)
+
+    def _on_volume_done(self, vm):
+        """Display volume result in the right panel."""
+        lines = self._vol_list.text().split("\n") if self._vol_list.text() != "—" else []
+        n = len(lines) + 1
+        lines.append(
+            f"{n}:  {vm.volume_m3:.4f} m³  |  {vm.mass_kg:,.0f} kg  |  {vm.mass_ton:.3f} tn"
+        )
+        self._vol_list.setText("\n".join(lines))
+        self._status_main.setText(f"⚗ {vm.label}")
+
     def _on_radial_center_toggled(self, checked: bool):
         if checked:
             self._gl.set_radial_wear_mode(False)
@@ -1359,6 +1407,7 @@ class MainWindow(QMainWindow):
         self._meas_list.setText("—")
         self._radial_list.setText("—")
         self._profile_list.setText("—")
+        self._vol_list.setText("—")
 
     def _on_erase_updated(self, count: int):
         self._lbl_erase_info.setText(f"Seleccionadas: {count:,} caras")

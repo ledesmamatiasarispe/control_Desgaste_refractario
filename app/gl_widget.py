@@ -24,6 +24,7 @@ class Mode(Enum):
     ERASE           = auto()
     MEASURE_DEPTH   = auto()
     COMPARE_RADIAL  = auto()
+    MEASURE_VOLUME  = auto()
 
 
 @dataclass
@@ -53,6 +54,19 @@ class DepthMeasurement:
     normal:    np.ndarray   # unit normal of the rim plane
     depth:     float        # perpendicular distance (model units)
     label:     str          # formatted string
+
+
+@dataclass
+class VolumeMeasurement:
+    rim_pts:        list         # [p1, p2, p3] — top rim reference plane
+    normal:         np.ndarray   # outward unit normal (pointing away from interior)
+    fill_height:    float        # depth from rim plane to fill level (model units)
+    fill_origin:    np.ndarray   # 3D centre of the fill-level plane
+    fill_disk_pts:  np.ndarray   # (N*3, 3) — fan triangles for the translucent disk
+    volume_m3:      float
+    mass_kg:        float
+    mass_ton:       float
+    label:          str
 
 
 @dataclass
@@ -100,10 +114,12 @@ class GLWidget(QOpenGLWidget):
     crop_ready        = Signal(list)     # 3 points for cylinder crop
     faces_erased      = Signal(object)   # MeshData after face deletion
     erase_updated     = Signal(int)      # count of pending faces to delete
-    depth_done        = Signal(object)   # DepthMeasurement
-    radial_scan_done  = Signal(object)   # RadialScan
-    profile_scan_done = Signal(object)   # ProfileScan
-    status_message    = Signal(str)
+    depth_done           = Signal(object)           # DepthMeasurement
+    radial_scan_done     = Signal(object)           # RadialScan
+    profile_scan_done    = Signal(object)           # ProfileScan
+    volume_height_needed = Signal(object, object)   # rim_centroid (np), normal (np)
+    volume_done          = Signal(object)           # VolumeMeasurement
+    status_message       = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -129,6 +145,12 @@ class GLWidget(QOpenGLWidget):
         self._diam_measurements: List[DiameterMeasurement] = []
         self._depth_pending: List[np.ndarray]          = []  # pts accumulating for depth mode
         self._depth_measurements: List[DepthMeasurement] = []
+
+        # Volume measurement state
+        self._vol_pending:      List[np.ndarray]          = []
+        self._vol_measurements: List[VolumeMeasurement]   = []
+        self._vol_last_rim:     Optional[List]            = None   # temp: [p1,p2,p3]
+        self._vol_last_normal:  Optional[np.ndarray]      = None   # temp: outward normal
 
         # Radial comparison state (Y slider)
         self._radial_scan:      Optional[RadialScan]  = None
@@ -441,6 +463,74 @@ class GLWidget(QOpenGLWidget):
         self._refresh_measure_render()
         self.repaint()
 
+    # ── volume measurement ────────────────────────────────────────────────────
+
+    def _make_disk_verts(self, center: np.ndarray, normal: np.ndarray,
+                         radius: float, n_pts: int = 48) -> np.ndarray:
+        """Fan of n_pts triangles forming a flat disk in the fill-level plane."""
+        n = np.asarray(normal, dtype=np.float64)
+        n /= np.linalg.norm(n)
+        up = np.array([0.0, 1.0, 0.0]) if abs(n[1]) < 0.9 else np.array([1.0, 0.0, 0.0])
+        u = np.cross(n, up); u /= np.linalg.norm(u)
+        v = np.cross(n, u);  v /= np.linalg.norm(v)
+        angles = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
+        ring = (center + radius * (np.outer(np.cos(angles), u)
+                                   + np.outer(np.sin(angles), v))).astype(np.float32)
+        c = center.astype(np.float32)
+        tris = np.empty((n_pts * 3, 3), dtype=np.float32)
+        for i in range(n_pts):
+            tris[i * 3]     = c
+            tris[i * 3 + 1] = ring[i]
+            tris[i * 3 + 2] = ring[(i + 1) % n_pts]
+        return tris
+
+    def complete_volume_measure(self, rim_centroid: np.ndarray, normal: np.ndarray,
+                                fill_height_display: float):
+        """Called by MainWindow after the user enters the fill height.
+
+        fill_height_display is in the current display units (mm by default).
+        Converts to model units, integrates cross-sections, stores the result.
+        """
+        from core.volume import compute_fill_volume, volume_mm3_to_m3, mass_kg, mass_ton
+        import trimesh as _trimesh
+        from PySide6.QtWidgets import QApplication
+
+        if self._mesh_data is None:
+            self.status_message.emit("Cargá una malla primero para medir el volumen")
+            return
+
+        fill_height_model = float(fill_height_display) / self._unit_factor
+        fill_origin = (rim_centroid - normal * fill_height_model).astype(np.float32)
+
+        mesh_tm = _trimesh.Trimesh(
+            vertices=self._mesh_data.vertices,
+            faces=self._mesh_data.faces,
+            process=False,
+        )
+
+        self.status_message.emit("Calculando volumen… (puede tardar unos segundos)")
+        QApplication.processEvents()
+
+        vol_model = compute_fill_volume(mesh_tm, fill_origin, normal, n_slices=80)
+        v_m3   = volume_mm3_to_m3(vol_model)
+        m_kg   = mass_kg(v_m3)
+        m_ton  = mass_ton(v_m3)
+        label  = (f"Vol: {v_m3:.4f} m³  |  {m_kg:,.0f} kg  |  {m_ton:.3f} tn")
+
+        rim = self._vol_last_rim or []
+        disk = self._make_disk_verts(fill_origin, normal,
+                                     radius=self._mesh_data.radius * 0.55)
+        vm = VolumeMeasurement(
+            rim_pts=rim, normal=normal,
+            fill_height=fill_height_model, fill_origin=fill_origin,
+            fill_disk_pts=disk,
+            volume_m3=v_m3, mass_kg=m_kg, mass_ton=m_ton, label=label,
+        )
+        self._vol_measurements.append(vm)
+        self._refresh_measure_render()
+        self.volume_done.emit(vm)
+        self.status_message.emit(f"{label}  — clic para otra medición")
+
     def _run_radial_scan(self, center: Optional[np.ndarray] = None):
         """Compute radial scan; uses combined centroid of both meshes if center is None."""
         if self._mesh_data is None:
@@ -567,6 +657,9 @@ class GLWidget(QOpenGLWidget):
         self._diam_measurements.clear()
         self._depth_measurements.clear()
         self._depth_pending.clear()
+        self._vol_measurements.clear()
+        self._vol_pending.clear()
+        self._vol_last_rim = self._vol_last_normal = None
         self._radial_scan  = None
         self._profile_scan = None
         self._meas_pending = None
@@ -619,6 +712,7 @@ class GLWidget(QOpenGLWidget):
             Mode.ERASE:          "Borrar caras — arrastrá para pintar (rueda = tamaño), Enter para confirmar, Esc para cancelar",
             Mode.MEASURE_DEPTH:  "Medir profundidad — seleccioná punto del borde 1/4",
             Mode.COMPARE_RADIAL: "Comparación radial — clic en la malla para cambiar la altura del corte",
+            Mode.MEASURE_VOLUME: "Medir volumen — seleccioná punto del borde 1/3",
         }
         if mode == Mode.COMPARE_RADIAL:
             self._run_radial_scan()
@@ -680,7 +774,8 @@ class GLWidget(QOpenGLWidget):
 
         # ── measurement labels (only when there's something to show) ────────
         has_anything = (self._measurements or self._meas_pending is not None
-                        or self._diam_measurements
+                        or self._diam_measurements or self._vol_measurements
+                        or self._vol_pending or self._depth_pending
                         or self._depth_measurements or self._radial_scan is not None
                         or self._profile_scan is not None)
         if not has_anything:
@@ -725,6 +820,16 @@ class GLWidget(QOpenGLWidget):
                 painter.fillRect(sx + 8, sy - 16, 80, 18, QColor(0, 0, 0, 160))
                 painter.setPen(QColor(0, 220, 255))
                 painter.drawText(sx + 10, sy - 2, "Pto. 1 — esperando Pto. 2")
+
+        # Volume measurement labels — at fill-level disk centre
+        for vm in self._vol_measurements:
+            sx, sy, vis = self._world_to_screen(vm.fill_origin, mvp)
+            if vis:
+                tw = 310
+                painter.setFont(font)
+                painter.fillRect(sx - tw//2, sy - 16, tw, 18, QColor(0, 0, 0, 190))
+                painter.setPen(QColor(60, 220, 120))
+                painter.drawText(sx - tw//2 + 4, sy - 2, vm.label)
 
         # Depth measurement labels — at midpoint of depth line
         for dm in self._depth_measurements:
@@ -865,7 +970,8 @@ class GLWidget(QOpenGLWidget):
             if self._mode in (Mode.ANNOTATE, Mode.ALIGN_3PT,
                               Mode.CALIBRATE_3PT, Mode.MEASURE,
                               Mode.CROP_CYLINDER, Mode.MEASURE_DIAM,
-                              Mode.MEASURE_DEPTH, Mode.COMPARE_RADIAL):
+                              Mode.MEASURE_DEPTH, Mode.COMPARE_RADIAL,
+                              Mode.MEASURE_VOLUME):
                 self._handle_pick(event.position())
             elif self._mode == Mode.ERASE:
                 self._handle_erase(event.position())
@@ -1018,6 +1124,33 @@ class GLWidget(QOpenGLWidget):
                 self.depth_done.emit(dm)
                 self.status_message.emit(f"{label}  — clic para otra medición, Esc para salir")
 
+        elif self._mode == Mode.MEASURE_VOLUME:
+            self._vol_pending.append(hit)
+            self._update_markers()
+            n = len(self._vol_pending)
+            if n < 3:
+                self.status_message.emit(f"Volumen — seleccioná punto del borde {n}/3")
+            else:
+                p1, p2, p3 = self._vol_pending
+                n_vec    = np.cross(p2 - p1, p3 - p1)
+                norm_len = np.linalg.norm(n_vec)
+                if norm_len < 1e-10:
+                    self.status_message.emit("Los 3 puntos son colineales — intentá con otros puntos")
+                    self._vol_pending.pop()
+                    return
+                normal = (n_vec / norm_len).astype(np.float32)
+                rim_centroid = ((p1 + p2 + p3) / 3).astype(np.float32)
+                # Orient normal to point outward (away from mesh interior)
+                if self._mesh_data is not None:
+                    toward_interior = self._mesh_data.centroid - rim_centroid
+                    if float(np.dot(toward_interior, normal)) > 0:
+                        normal = -normal
+                self._vol_last_rim    = [p1, p2, p3]
+                self._vol_last_normal = normal
+                self._vol_pending.clear()
+                self.status_message.emit("Volumen — ingresá la altura máxima del crisol en el cuadro de diálogo")
+                self.volume_height_needed.emit(rim_centroid, normal)
+
         elif self._mode == Mode.COMPARE_RADIAL:
             # Click changes the Y height of the scan plane; keep XZ from existing center
             if self._radial_scan is not None:
@@ -1064,6 +1197,21 @@ class GLWidget(QOpenGLWidget):
                     self.align_ready.emit(pts)
 
     def _update_markers(self):
+        if self._mode == Mode.MEASURE_VOLUME and self._vol_pending:
+            rim_colors = [
+                [1.0, 0.2, 0.2, 1.0],   # red   – pt 1
+                [0.2, 1.0, 0.2, 1.0],   # green – pt 2
+                [0.2, 0.5, 1.0, 1.0],   # blue  – pt 3
+            ]
+            positions = np.array(self._vol_pending, dtype=np.float32)
+            colors    = np.array([rim_colors[i] for i in range(len(self._vol_pending))],
+                                  dtype=np.float32)
+            self.makeCurrent()
+            self._renderer.update_markers(positions, colors)
+            self.doneCurrent()
+            self.update()
+            return
+
         if self._mode == Mode.MEASURE_DEPTH and self._depth_pending:
             depth_colors = [
                 [1.0, 0.2, 0.2, 1.0],  # red    – rim pt 1
@@ -1237,6 +1385,16 @@ class GLWidget(QOpenGLWidget):
             mk_pts.append(self._meas_pending)
             mk_col.append(_CYAN)
 
+        # Volume measurements — rim triangle edges + fill-origin marker
+        _COL_VOL = [0.2, 0.9, 0.5, 1.0]   # green — fill level
+        for vm in self._vol_measurements:
+            r = vm.rim_pts
+            if len(r) == 3:
+                for a, b in ((r[0], r[1]), (r[1], r[2]), (r[2], r[0])):
+                    seg_pts.extend([a, b])
+                    seg_col.extend([[0.8, 0.5, 0.1, 1.0], [0.8, 0.5, 0.1, 1.0]])
+            mk_pts.append(vm.fill_origin); mk_col.append(_COL_VOL)
+
         # Radial comparison
         if self._radial_scan is not None:
             sc = self._radial_scan
@@ -1341,6 +1499,12 @@ class GLWidget(QOpenGLWidget):
         for dm in self._diam_measurements:
             plane_parts.append(dm.plane_verts)
             color_parts.append(np.tile(_PLANE_USER,   (len(dm.plane_verts), 1)).astype(np.float32))
+        # Volume fill-level disks
+        _PLANE_FILL = [0.15, 0.75, 0.35, 0.28]   # semi-transparent green
+        for vm in self._vol_measurements:
+            plane_parts.append(vm.fill_disk_pts)
+            color_parts.append(np.tile(_PLANE_FILL,
+                                       (len(vm.fill_disk_pts), 1)).astype(np.float32))
         # Wear area filled polygon (only in wear-display mode)
         if self._radial_scan is not None and self._radial_show_wear:
             sc = self._radial_scan
