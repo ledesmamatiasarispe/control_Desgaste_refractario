@@ -134,6 +134,7 @@ class GLWidget(QOpenGLWidget):
         self._heatmap   = False
 
         self._last_mouse = None
+        self._press_pos  = None   # position at mouse-down (to distinguish click vs drag)
         self._mouse_btn  = None
 
         self._unit_factor   = 1.0
@@ -994,19 +995,20 @@ class GLWidget(QOpenGLWidget):
 
     # ── mouse ────────────────────────────────────────────────────────────────
 
+    _PICK_MODES = (Mode.ANNOTATE, Mode.ALIGN_3PT, Mode.CALIBRATE_3PT,
+                   Mode.MEASURE, Mode.CROP_CYLINDER, Mode.MEASURE_DIAM,
+                   Mode.MEASURE_DEPTH, Mode.COMPARE_RADIAL, Mode.MEASURE_VOLUME)
+    _DRAG_THRESHOLD_PX = 5   # pixels — below this a left-click is a pick, above it is an orbit
+
     def mousePressEvent(self, event):
         self._last_mouse = event.position()
+        self._press_pos  = event.position()
         self._mouse_btn  = event.button()
 
         if event.button() == Qt.MouseButton.LeftButton:
-            if self._mode in (Mode.ANNOTATE, Mode.ALIGN_3PT,
-                              Mode.CALIBRATE_3PT, Mode.MEASURE,
-                              Mode.CROP_CYLINDER, Mode.MEASURE_DIAM,
-                              Mode.MEASURE_DEPTH, Mode.COMPARE_RADIAL,
-                              Mode.MEASURE_VOLUME):
-                self._handle_pick(event.position())
-            elif self._mode == Mode.ERASE:
+            if self._mode == Mode.ERASE:
                 self._handle_erase(event.position())
+            # Pick modes: defer pick to mouseRelease so left-drag can still orbit
 
     def mouseMoveEvent(self, event):
         if self._last_mouse is None:
@@ -1016,17 +1018,28 @@ class GLWidget(QOpenGLWidget):
         self._last_mouse = event.position()
 
         btn = event.buttons()
-        if btn & Qt.MouseButton.LeftButton and self._mode == Mode.NAVIGATE:
-            self._camera.orbit(dx, dy)
-            self.update()
-        elif btn & Qt.MouseButton.LeftButton and self._mode == Mode.ERASE:
-            self._handle_erase(event.position())
+        if btn & Qt.MouseButton.LeftButton:
+            if self._mode == Mode.ERASE:
+                self._handle_erase(event.position())
+            else:
+                # Orbit in any mode — pick will fire on release only if drag < threshold
+                self._camera.orbit(dx, dy)
+                self.update()
         elif btn & Qt.MouseButton.RightButton or btn & Qt.MouseButton.MiddleButton:
             self._camera.pan(dx, dy, self.height())
             self.update()
 
     def mouseReleaseEvent(self, event):
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._press_pos is not None
+                and self._mode in self._PICK_MODES):
+            p = event.position()
+            dist = ((p.x() - self._press_pos.x()) ** 2
+                    + (p.y() - self._press_pos.y()) ** 2) ** 0.5
+            if dist < self._DRAG_THRESHOLD_PX:
+                self._handle_pick(p)
         self._last_mouse = None
+        self._press_pos  = None
         self._mouse_btn  = None
 
     def wheelEvent(self, event):
