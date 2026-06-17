@@ -490,6 +490,14 @@ class GLWidget(QOpenGLWidget):
             tris[i * 3 + 2] = ring[(i + 1) % n_pts]
         return tris
 
+    def set_volume_density(self, density_kg_m3: float):
+        """Update liquid metal density and refresh the current volume result."""
+        from core import volume as _vol_mod
+        _vol_mod._LIQUID_IRON_DENSITY_KG_M3 = float(density_kg_m3)
+        if self._vol_profile_depths is not None and self._vol_measurements:
+            frac = 1.0 - (self._vol_measurements[0].fill_height / (self._vol_full_depth + 1e-12))
+            self._update_vol_from_fraction(max(0.0, min(1.0, frac)))
+
     def set_volume_fill_level(self, fraction: float):
         """Called by the fill-level slider to update the volume in real time."""
         if self._vol_profile_depths is None or self._mesh_data is None:

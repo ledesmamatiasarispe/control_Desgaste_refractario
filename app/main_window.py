@@ -302,7 +302,19 @@ class MainWindow(QMainWindow):
         grp_vol = QGroupBox("Volumen de trabajo (⚗ V)")
         vlay = QVBoxLayout(grp_vol)
 
-        from PySide6.QtWidgets import QSlider
+        from PySide6.QtWidgets import QSlider, QDoubleSpinBox
+        dens_row = QHBoxLayout()
+        dens_row.addWidget(QLabel("Densidad (kg/m³):"))
+        self._vol_density = QDoubleSpinBox()
+        self._vol_density.setRange(5000, 9000)
+        self._vol_density.setDecimals(0)
+        self._vol_density.setValue(7150)
+        self._vol_density.setSingleStep(50)
+        self._vol_density.setToolTip("Densidad del metal líquido en kg/m³")
+        self._vol_density.valueChanged.connect(self._on_vol_density_changed)
+        dens_row.addWidget(self._vol_density)
+        vlay.addLayout(dens_row)
+
         self._vol_slider = QSlider(Qt.Orientation.Horizontal)
         self._vol_slider.setRange(0, 1000)
         self._vol_slider.setValue(1000)
@@ -1348,6 +1360,9 @@ class MainWindow(QMainWindow):
         self._vol_slider.setVisible(True)
         self._vol_depth_label.setVisible(True)
         self._on_vol_slider_changed(1000)
+
+    def _on_vol_density_changed(self, density: float):
+        self._gl.set_volume_density(density)
 
     def _on_vol_slider_changed(self, val: int):
         fraction = val / 1000.0
