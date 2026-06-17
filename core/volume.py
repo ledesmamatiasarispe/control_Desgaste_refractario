@@ -90,6 +90,7 @@ def compute_section_profile(mesh_tm,
 
     depths = np.linspace(0.0, max_depth, n_slices + 1)
     areas  = []
+    valid  = 0
     for d in depths:
         slice_pt = origin - normal * d
         try:
@@ -98,11 +99,14 @@ def compute_section_profile(mesh_tm,
                 areas.append(0.0)
                 continue
             path2d, _ = section.to_2D()
-            areas.append(max(0.0, float(path2d.area)))
+            a = max(0.0, float(path2d.area))
+            areas.append(a)
+            if a > 0.0:
+                valid += 1
         except Exception:
             areas.append(0.0)
 
-    return depths, np.array(areas)
+    return depths, np.array(areas), valid
 
 
 def volume_from_profile(depths: np.ndarray, areas: np.ndarray,

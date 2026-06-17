@@ -1201,15 +1201,20 @@ class GLWidget(QOpenGLWidget):
                 self.status_message.emit("Calculando perfil de secciones…")
                 QApplication.processEvents()
 
-                depths, areas = compute_section_profile(
+                depths, areas, valid_slices = compute_section_profile(
                     mesh_tm, rim_centroid, normal, n_slices=100)
                 self._vol_profile_depths = depths
                 self._vol_profile_areas  = areas
 
+                depth_disp = self._vol_full_depth * self._unit_factor
+                total_slices = len(depths)
                 self._update_vol_from_fraction(1.0)
                 self.volume_profile_ready.emit(
-                    rim_centroid, normal, self._vol_full_depth * self._unit_factor)
-                self.status_message.emit("Usá el slider para ajustar el nivel de llenado")
+                    rim_centroid, normal, depth_disp)
+                self.status_message.emit(
+                    f"Perfil listo — {valid_slices}/{total_slices} secciones válidas  |  "
+                    f"profundidad detectada: {depth_disp:.1f} {self._unit_suffix}  |  "
+                    "Usá el slider para ajustar el nivel")
 
         elif self._mode == Mode.COMPARE_RADIAL:
             # Click changes the Y height of the scan plane; keep XZ from existing center
