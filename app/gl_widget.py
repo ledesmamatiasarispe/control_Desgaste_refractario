@@ -120,6 +120,7 @@ class GLWidget(QOpenGLWidget):
     profile_scan_done    = Signal(object)           # ProfileScan
     volume_profile_ready = Signal(object, object, float)  # centroid, normal, full_depth (display units)
     volume_done          = Signal(object)                 # VolumeMeasurement
+    measurements_cleared = Signal()
     status_message       = Signal(str)
 
     def __init__(self, parent=None):
@@ -186,6 +187,7 @@ class GLWidget(QOpenGLWidget):
         self._heatmap    = False
         self._align_pts  = []
         self._erase_pending.clear()
+        self.clear_measurements()
         # Precompute face centroids and edge-adjacency for erase mode
         if mesh_data.faces is not None and len(mesh_data.faces):
             vf = mesh_data.vertices[mesh_data.faces]   # (F, 3, 3)
@@ -693,6 +695,7 @@ class GLWidget(QOpenGLWidget):
         self._profile_scan = None
         self._meas_pending = None
         self._refresh_measure_render()
+        self.measurements_cleared.emit()
 
     def set_ref_mode(self, mode: str):
         self._renderer.set_ref_mode(mode)

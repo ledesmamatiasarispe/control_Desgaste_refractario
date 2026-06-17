@@ -144,6 +144,7 @@ class MainWindow(QMainWindow):
         self._gl.profile_scan_done.connect(self._on_profile_scan)
         self._gl.volume_profile_ready.connect(self._on_volume_profile_ready)
         self._gl.volume_done.connect(self._on_volume_done)
+        self._gl.measurements_cleared.connect(self._on_measurements_cleared)
 
         # Right panel
         right = self._build_right_panel()
@@ -1427,8 +1428,8 @@ class MainWindow(QMainWindow):
             lines.append(f"Y≈{h:.1f}  A:{wa}  B:{wb}  ΔL:{gl}  ΔR:{gr} {us}")
         self._profile_list.setText("\n".join(lines) if lines else "—")
 
-    def _clear_measurements(self):
-        self._gl.clear_measurements()
+    def _on_measurements_cleared(self):
+        """Sync UI when gl_widget clears measurements (e.g. on mesh load)."""
         self._meas_list.setText("—")
         self._radial_list.setText("—")
         self._profile_list.setText("—")
@@ -1436,6 +1437,9 @@ class MainWindow(QMainWindow):
         self._vol_slider.setVisible(False)
         self._vol_depth_label.setVisible(False)
         self._vol_full_depth_display = 0.0
+
+    def _clear_measurements(self):
+        self._gl.clear_measurements()   # emits measurements_cleared → _on_measurements_cleared
 
     def _on_erase_updated(self, count: int):
         self._lbl_erase_info.setText(f"Seleccionadas: {count:,} caras")
